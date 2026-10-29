@@ -15,7 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GTK + app indicator for the tray icon, libxdo for tray menu support.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
 

@@ -21,7 +21,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 
 ### 1. Install the prerequisites
 
-**All platforms:** install Rust from [rustup.rs](https://rustup.rs) (stable toolchain, Rust 1.85 or newer).
+**All platforms:** install Rust from [rustup.rs](https://rustup.rs) (stable toolchain, Rust 1.88 or newer).
 
 | OS | Also needed |
 |---|---|
@@ -79,13 +79,26 @@ Run the binary. A progress bar shows while it indexes your existing sessions; th
 | **Model** | Model used by the session's latest request |
 | **Start context** | Context size when tracking started: at app launch for existing sessions, or the first request of a session started later |
 | **Latest context** | Context size of the latest request, as `used / window (percent)` |
-| **New context** | Latest context minus start context: how much context the session has added while the app was running. Negative after `/compact`. |
+| **New context** | Total context the session has added while the app was running. It only goes up: a compaction adds nothing, and growth after it adds on top. |
+| **Compacted** | How many times the session was compacted (manual `/compact` or auto-compact) since tracking started |
 
 "Context" is the full prompt sent on a request: input + cache write + cache read tokens. Subagent requests are ignored, since they run in their own context window. Context windows are 1M tokens for Claude 4.6 and newer models, 200K for older ones.
 
-**Example:** a session starts at 10K. After a few requests its latest context is 100K, so new context is **+90K**. Thirty minutes later it's at 150K, so new context is **+140K**.
+**Example:** the app starts while a session is at 50K.
 
-Restarting the app resets the start context of every session to its current value.
+| Time | What happens | Latest context | New context | Compacted |
+|---|---|---|---|---|
+| 09:00 | App starts | 50K / 1M (5%) | +0 | — |
+| 09:10 | Work continues | 120K / 1M (12%) | +70K | — |
+| 09:25 | Work continues | 210K / 1M (21%) | +160K | — |
+| 09:40 | `/compact` | 35K / 1M (4%) | +160K | 1× |
+| 09:55 | Work continues | 90K / 1M (9%) | +215K | 1× |
+| 10:15 | Auto-compact | 30K / 1M (3%) | +215K | 2× |
+| 10:25 | Work continues | 70K / 1M (7%) | +255K | 2× |
+
+A compaction is detected whenever the context shrinks between two requests; outside of compaction it never does.
+
+Restarting the app resets the start context of every session to its current value and its new context and compaction count to zero.
 
 Click a column header to sort by it (click again to reverse). Use the search box to filter by session name, model or project path. By default the most recently active session is on top.
 
@@ -115,8 +128,8 @@ The app writes a tab-separated snapshot right after startup, then checks every *
 Format:
 
 ```
-machine	session	model	start_context	latest_context	new_context
-MY-LAPTOP	RAG system with pgvector in Go	claude-opus-5-5	128.2K	135.0K / 1M (14%)	+6.8K
+machine	session	model	start_context	latest_context	new_context	compactions
+MY-LAPTOP	RAG system with pgvector in Go	claude-opus-5-5	50.0K	90.0K / 1M (9%)	+215.0K	1
 ```
 
 Text editors such as Notepad don't reload a file that changes while it is open; reopen it to see a new snapshot.

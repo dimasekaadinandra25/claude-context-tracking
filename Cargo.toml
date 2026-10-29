@@ -2,6 +2,10 @@
 name = "claude-usage-monitor"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Desktop tray app that tracks context usage of every local Claude Code session"
+repository = "https://github.com/dimasekaadinandra25/claude-context-tracking"
+readme = "README.md"
 
 [dependencies]
 dirs = "7.0.0"
@@ -12,3 +16,8 @@ tray-icon = "0.26.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
