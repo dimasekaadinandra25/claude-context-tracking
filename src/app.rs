@@ -1,14 +1,16 @@
+use crate::config;
 use crate::details;
 use crate::overhead::{self, Overhead};
 use crate::platform::{self, APP_NAME};
 use crate::session::{Session, format_age, format_tokens, total_new_context};
+use crate::sync::SyncStatus;
 use crate::theme::{self, ACCENT};
 use crate::tray::{self, Tray};
 use crate::watcher::{self, Update};
 use eframe::egui::{self, Align, Color32, Layout, ProgressBar, RichText, Ui, vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const LIVE_COLOR: Color32 = Color32::from_rgb(60, 180, 90);
 const ACTIVE_TEXT_SIZE: f32 = 20.0;
@@ -23,6 +25,8 @@ const IDLE_INSET: i8 = 16;
 const CARD_MARGIN: i8 = 14;
 const CARD_SPACING: f32 = 8.0;
 const SEARCH_WIDTH: f32 = 220.0;
+const SETTINGS_FIELD_WIDTH: f32 = 320.0;
+const SYNC_REASON_CHARS: usize = 60;
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const OVERHEAD_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NEW_CONTEXT_HINT: &str = "Context added since start. Keeps counting through /compact: a compaction adds nothing, growth after it adds on top.";
@@ -38,6 +42,8 @@ pub struct App {
     overheads: HashMap<String, Overhead>,
     overheads_refreshed: Option<Instant>,
     tray: Option<Tray>,
+    sync: Option<SyncStatus>,
+    settings: Option<String>,
 }
 
 impl App {
@@ -53,6 +59,8 @@ impl App {
             overheads: HashMap::new(),
             overheads_refreshed: None,
             tray: tray::spawn(cc.egui_ctx.clone()),
+            sync: None,
+            settings: None,
         }
     }
 
@@ -69,6 +77,7 @@ impl App {
             match update {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
+                Update::Sync(status) => self.sync = Some(status),
             }
         }
         if let Some(mut sessions) = latest {
@@ -84,6 +93,12 @@ impl App {
             ui.heading(RichText::new(APP_NAME).strong());
             ui.label(RichText::new(&self.machine).weak());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if settings_button(ui) {
+                    self.settings = Some(config::load().api_key);
+                }
+                if let Some(status) = &self.sync {
+                    sync_label(ui, status);
+                }
                 if self.indexing.is_none() {
                     ui.colored_label(LIVE_COLOR, "● Live").on_hover_text(
                         "Watching session files; updates within ~2s of each request",
@@ -183,6 +198,32 @@ impl App {
             .show(ctx, |ui| details::show(ui, session, self.overhead(session)));
         if !open {
             self.details_for = None;
+        }
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let Some(api_key) = &mut self.settings else {
+            return;
+        };
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new("Sync settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("API key");
+                    ui.add(
+                        egui::TextEdit::singleline(api_key)
+                            .password(true)
+                            .desired_width(SETTINGS_FIELD_WIDTH),
+                    );
+                });
+                save = ui.button("Save").clicked();
+            });
+        if !open || (save && config::save_api_key(api_key).is_ok()) {
+            self.settings = None;
         }
     }
 
@@ -358,8 +399,37 @@ impl eframe::App for App {
             self.details_for = opened;
         }
         self.details_window(ui.ctx());
+        self.settings_window(ui.ctx());
         ui.ctx().request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
     }
+}
+
+fn settings_button(ui: &mut Ui) -> bool {
+    ui.add(egui::Button::new(RichText::new("⚙").size(ACTIVE_TEXT_SIZE)).frame(false))
+        .on_hover_text("Sync settings")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+fn sync_label(ui: &mut Ui, status: &SyncStatus) {
+    match status {
+        SyncStatus::Off => {
+            ui.label(RichText::new("Sync off").weak());
+        }
+        SyncStatus::Synced(at) => {
+            ui.label(RichText::new(format!("Synced {}", utc_clock(*at))).weak());
+        }
+        SyncStatus::Failed(reason) => {
+            let short: String = reason.chars().take(SYNC_REASON_CHARS).collect();
+            ui.label(RichText::new(format!("Sync failed: {short}")).weak())
+                .on_hover_text(reason);
+        }
+    }
+}
+
+fn utc_clock(at: SystemTime) -> String {
+    let seconds = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() % 86_400;
+    format!("{:02}:{:02} UTC", seconds / 3_600, seconds % 3_600 / 60)
 }
 
 fn split_row<R, L>(

@@ -13,6 +13,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Claude colors, following your system's light or dark mode
 - System tray icon: closing the window hides it to the tray instead of quitting
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
+- Optionally syncs usage to a team server every 30 minutes
 - Runs on Windows, macOS and Linux
 
 > Only **Claude Code** sessions (CLI and IDE extensions) are tracked. claude.ai web/desktop/mobile chats are stored on Anthropic's servers, not on your disk, so they can't be read.
@@ -167,6 +168,25 @@ MY-LAPTOP	RAG system with pgvector in Go	claude-opus-5-5	50.0K	90.0K / 1M (9%)	+
 Text editors such as Notepad don't reload a file that changes while it is open; reopen it to see a new snapshot.
 
 If the app ever crashes, details are appended to `crash.log` in the same folder.
+
+### Sync to a usage server
+
+The app can send each session's usage to a `claude-usage-server` so a team dashboard shows everyone's usage over time.
+
+1. Ask your admin for an API key.
+2. Click the **⚙** button in the top bar, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
+
+The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count. The top bar shows `Sync off`, `Synced 12:30 UTC` or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick.
+
+Settings live in `config.json` and the sync position in `sync_state.json`:
+
+| OS | Location |
+|---|---|
+| Windows | `%APPDATA%\claude-usage-monitor\` |
+| macOS | `~/Library/Application Support/claude-usage-monitor/` |
+| Linux | `~/.config/claude-usage-monitor/` |
+
+The environment variables `CLAUDE_USAGE_SERVER_URL` and `CLAUDE_USAGE_API_KEY` override `config.json`, and `CLAUDE_USAGE_CONFIG_DIR` moves both files to another folder.
 
 ### Configuration
 

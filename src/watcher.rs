@@ -2,6 +2,7 @@ use crate::export::{to_tsv, write_atomic};
 use crate::index::Index;
 use crate::platform;
 use crate::session::Session;
+use crate::sync::{SyncStatus, Syncer};
 use eframe::egui;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ const EXPORT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 pub enum Update {
     Indexing { done: usize, total: usize },
     Sessions(Vec<Session>),
+    Sync(SyncStatus),
 }
 
 pub fn spawn(ctx: egui::Context) -> Receiver<Update> {
@@ -29,7 +31,9 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>) {
     });
     index.reset_baselines();
 
-    let mut exporter = Exporter::new(platform::machine_name());
+    let machine = platform::machine_name();
+    let mut exporter = Exporter::new(machine.clone());
+    let mut syncer = Syncer::new();
     let mut changed = true;
     loop {
         if changed {
@@ -39,6 +43,10 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>) {
             ctx.request_repaint();
         }
         exporter.tick(&index);
+        if let Some(status) = syncer.tick(&index, &machine) {
+            let _ = tx.send(Update::Sync(status));
+            ctx.request_repaint();
+        }
         std::thread::sleep(POLL_INTERVAL);
         changed = index.scan(&root, |_, _| {});
     }

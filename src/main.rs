@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 mod details;
 mod export;
 mod index;
 mod overhead;
 mod platform;
 mod session;
+mod sync;
 mod theme;
 mod tray;
 mod watcher;

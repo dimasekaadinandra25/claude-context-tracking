@@ -19,6 +19,12 @@ impl RequestUsage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HourUsage {
+    pub new_context: u64,
+    pub requests: u32,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Session {
     pub id: String,
@@ -38,6 +44,8 @@ pub struct Session {
     pub last_usage: RequestUsage,
     pub context_window: u64,
     pub estimated: bool,
+    pub hours: BTreeMap<(String, String), HourUsage>,
+    pub compactions_lifetime: u32,
 }
 
 impl Session {
@@ -64,6 +72,7 @@ impl Session {
 
     pub fn record_request(&mut self, model: String, usage: RequestUsage, at: String) {
         let context = usage.context();
+        let mut growth = 0;
         if !self.has_requests() {
             self.start_context = context;
             self.base_context = context;
@@ -71,12 +80,13 @@ impl Session {
         } else if self.estimated || model != self.model {
             self.estimated = false;
         } else if context > self.latest_context {
-            let growth = context - self.latest_context;
+            growth = context - self.latest_context;
             self.new_context += growth;
             *self.new_context_by_model.entry(model.clone()).or_default() += growth;
         } else if context < self.latest_context {
-            self.compactions += 1;
+            self.count_compaction();
         }
+        self.record_hour(&at, &model, growth);
         self.latest_context = context;
         self.peak_context = self.peak_context.max(context);
         self.requests += 1;
@@ -91,9 +101,27 @@ impl Session {
             return;
         }
         self.latest_context = self.system_context() + summary_tokens;
-        self.compactions += 1;
+        self.count_compaction();
         self.estimated = true;
         self.latest_at = at;
+    }
+
+    fn count_compaction(&mut self) {
+        self.compactions += 1;
+        self.compactions_lifetime += 1;
+    }
+
+    fn record_hour(&mut self, at: &str, model: &str, growth: u64) {
+        let Some(hour) = hour_key(at) else {
+            return;
+        };
+        let usage = self.hours.entry((hour, model.to_owned())).or_default();
+        usage.new_context += growth;
+        usage.requests += 1;
+    }
+
+    pub fn lifetime_new_context(&self) -> u64 {
+        self.hours.values().map(|hour| hour.new_context).sum()
     }
 
     pub fn record_model_switch(&mut self, model: String) {
@@ -156,7 +184,7 @@ impl Session {
     }
 }
 
-fn unix_seconds(at: &str) -> Option<u64> {
+pub fn unix_seconds(at: &str) -> Option<u64> {
     let field = |start: usize, len: usize| at.get(start..start + len)?.parse::<i64>().ok();
     let (year, month, day) = (field(0, 4)?, field(5, 2)?, field(8, 2)?);
     let seconds = field(11, 2)? * 3_600 + field(14, 2)? * 60 + field(17, 2)?;
@@ -164,6 +192,11 @@ fn unix_seconds(at: &str) -> Option<u64> {
     let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let days = year * 365 + year / 4 - year / 100 + year / 400 + day_of_year - 719_468;
     u64::try_from(days * 86_400 + seconds).ok()
+}
+
+pub fn hour_key(at: &str) -> Option<String> {
+    unix_seconds(at)?;
+    Some(format!("{}:00:00Z", &at[..13]))
 }
 
 pub fn format_age(age: Duration) -> String {
@@ -317,6 +350,87 @@ mod tests {
 
         session.reset_baseline();
         assert!(session.new_context_by_model.is_empty());
+    }
+
+    fn hour_at(time: &str) -> String {
+        format!("2026-10-30T{time}:00Z")
+    }
+
+    fn three_hour_session() -> Session {
+        let mut session = Session::new("s1".into());
+        for (time, context) in [("02:10", 20_000), ("02:50", 60_000), ("03:05", 70_000)] {
+            session.record_request(MODEL.into(), cached(context), hour_at(time));
+        }
+        session
+    }
+
+    fn hour(session: &Session, hour: &str, model: &str) -> HourUsage {
+        session.hours[&(format!("2026-10-30T{hour}:00:00Z"), model.to_owned())]
+    }
+
+    #[test]
+    fn hours_bucket_growth_by_hour_and_model() {
+        let session = three_hour_session();
+        assert_eq!(
+            hour(&session, "02", MODEL),
+            HourUsage {
+                new_context: 40_000,
+                requests: 2
+            }
+        );
+        assert_eq!(
+            hour(&session, "03", MODEL),
+            HourUsage {
+                new_context: 10_000,
+                requests: 1
+            }
+        );
+        assert_eq!(
+            hour_key("2026-10-30T02:10:59.123Z").as_deref(),
+            Some("2026-10-30T02:00:00Z")
+        );
+        assert_eq!(hour_key("09:00"), None);
+    }
+
+    #[test]
+    fn reset_baseline_keeps_lifetime_hours() {
+        let mut session = three_hour_session();
+        session.record_request(MODEL.into(), cached(30_000), hour_at("03:20"));
+        let hours = session.hours.clone();
+        assert_eq!(session.compactions_lifetime, 1);
+
+        session.reset_baseline();
+        assert_eq!(session.hours, hours);
+        assert_eq!(session.compactions_lifetime, 1);
+        assert_eq!(session.lifetime_new_context(), 50_000);
+        assert_eq!(session.new_context, 0);
+    }
+
+    #[test]
+    fn hours_follow_rebaseline_rules() {
+        let mut session = three_hour_session();
+        session.record_model_switch(SONNET.into());
+        session.record_request(SONNET.into(), cached(90_000), hour_at("03:10"));
+        assert_eq!(
+            hour(&session, "03", SONNET),
+            HourUsage {
+                new_context: 0,
+                requests: 1
+            }
+        );
+
+        session.record_compaction(5_000, hour_at("03:15"));
+        assert_eq!(session.compactions_lifetime, 1);
+        session.record_request(SONNET.into(), cached(40_000), hour_at("03:16"));
+        assert_eq!(
+            hour(&session, "03", SONNET),
+            HourUsage {
+                new_context: 0,
+                requests: 2
+            }
+        );
+        assert_eq!(session.compactions_lifetime, 1);
+        assert_eq!(session.lifetime_new_context(), 50_000);
     }
 
     #[test]
