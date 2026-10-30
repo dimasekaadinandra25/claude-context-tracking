@@ -1,4 +1,5 @@
-use crate::session::Session;
+use crate::platform;
+use crate::session::{RequestUsage, Session};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -19,27 +20,21 @@ struct Record {
     #[serde(default)]
     is_sidechain: bool,
     message: Option<Message>,
+    compact_metadata: Option<CompactMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactMetadata {
+    #[serde(default)]
+    post_tokens: u64,
 }
 
 #[derive(Deserialize)]
 struct Message {
     id: Option<String>,
     model: Option<String>,
-    usage: Option<Usage>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Usage {
-    input_tokens: u64,
-    cache_creation_input_tokens: u64,
-    cache_read_input_tokens: u64,
-}
-
-impl Usage {
-    fn context(&self) -> u64 {
-        self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
-    }
+    usage: Option<RequestUsage>,
 }
 
 #[derive(Default)]
@@ -51,7 +46,9 @@ pub struct Index {
 
 impl Index {
     pub fn scan(&mut self, root: &Path, mut on_progress: impl FnMut(usize, usize)) -> bool {
-        let files = jsonl_files(root);
+        let files = platform::find_files(root, |path| {
+            path.extension().is_some_and(|ext| ext == "jsonl")
+        });
         let mut changed = false;
         for (i, file) in files.iter().enumerate() {
             changed |= self.read_appended(file);
@@ -123,6 +120,13 @@ impl Index {
         if record.is_sidechain {
             return;
         }
+        let at = record.timestamp.unwrap_or_default();
+        if let Some(compaction) = record.compact_metadata {
+            if at >= session.latest_at {
+                session.record_compaction(compaction.post_tokens, at);
+            }
+            return;
+        }
         let Some(Message {
             id: Some(message_id),
             model: Some(model),
@@ -131,62 +135,25 @@ impl Index {
         else {
             return;
         };
-        let at = record.timestamp.unwrap_or_default();
         if model == SYNTHETIC_MODEL
             || !self.seen_messages.insert(message_id)
             || at < session.latest_at
         {
             return;
         }
-        session.record_request(model, usage.context(), at);
+        session.record_request(model, usage, at);
     }
-}
-
-fn jsonl_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for path in entries.flatten().map(|e| e.path()) {
-            if path.is_dir() {
-                dirs.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
-                files.push(path);
-            }
-        }
-    }
-    files
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::TempDir;
 
     fn request(session: &str, id: &str, at: &str, context: u64) -> String {
         format!(
             r#"{{"type":"assistant","sessionId":"{session}","cwd":"C:\\Code\\RAG","timestamp":"{at}","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":0,"cache_read_input_tokens":{context}}}}}}}"#
         )
-    }
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "claude-usage-monitor-{name}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 
     #[test]
@@ -214,15 +181,34 @@ mod tests {
     }
 
     #[test]
+    fn compact_boundary_counts_compaction_right_away() {
+        let mut index = Index::default();
+        index.ingest(&request("s1", "m1", "2026-01-01T00:00:00Z", 40_000), "file");
+        index.ingest(
+            &request("s1", "m2", "2026-01-01T00:05:00Z", 400_000),
+            "file",
+        );
+        index.ingest(
+            r#"{"type":"system","subtype":"compact_boundary","sessionId":"s1","timestamp":"2026-01-01T00:06:00Z","compactMetadata":{"trigger":"manual","preTokens":400000,"postTokens":20000}}"#,
+            "file",
+        );
+
+        let session = &index.sessions["s1"];
+        assert_eq!(session.compactions, 1);
+        assert_eq!(session.latest_context, 60_000);
+        assert!(session.estimated);
+    }
+
+    #[test]
     fn scan_reads_only_complete_appended_lines() {
         let dir = TempDir::new("scan");
-        let (s1, s2) = (dir.0.join("s1.jsonl"), dir.0.join("s2.jsonl"));
+        let (s1, s2) = (dir.path().join("s1.jsonl"), dir.path().join("s2.jsonl"));
         let first = request("s1", "m1", "2026-01-01T09:00:00Z", 10_000);
         let second = request("s1", "m2", "2026-01-01T09:10:00Z", 100_000);
         std::fs::write(&s1, format!("{first}\n{}", &second[..20])).unwrap();
 
         let mut index = Index::default();
-        assert!(index.scan(&dir.0, |_, _| {}));
+        assert!(index.scan(dir.path(), |_, _| {}));
         index.reset_baselines();
         assert_eq!(index.sessions["s1"].latest_context, 10_000);
 
@@ -236,9 +222,9 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(index.scan(&dir.0, |_, _| {}));
+        assert!(index.scan(dir.path(), |_, _| {}));
         assert_eq!(index.sessions["s1"].new_context_label(), "+90.0K");
         assert_eq!(index.sessions["s2"].new_context_label(), "+90.0K");
-        assert!(!index.scan(&dir.0, |_, _| {}));
+        assert!(!index.scan(dir.path(), |_, _| {}));
     }
 }

@@ -37,6 +37,7 @@ pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::cached;
 
     #[test]
     fn tsv_lists_most_recent_session_first() {
@@ -44,14 +45,14 @@ mod tests {
         older.title = "Older".into();
         older.record_request(
             "claude-opus-5-5".into(),
-            10_000,
+            cached(10_000),
             "2026-01-01T09:00:00Z".into(),
         );
         let mut newer = Session::new("b".into());
         newer.title = "Newer".into();
         newer.record_request(
             "claude-opus-5-5".into(),
-            20_000,
+            cached(20_000),
             "2026-01-01T10:00:00Z".into(),
         );
 
