@@ -66,7 +66,7 @@ impl Session {
             self.start_context = context;
             self.base_context = context;
             self.first_at.clone_from(&at);
-        } else if self.estimated {
+        } else if self.estimated || model != self.model {
             self.estimated = false;
         } else if context >= self.latest_context {
             self.new_context += context - self.latest_context;
@@ -90,6 +90,15 @@ impl Session {
         self.compactions += 1;
         self.estimated = true;
         self.latest_at = at;
+    }
+
+    pub fn record_model_switch(&mut self, model: String) {
+        if !self.has_requests() || model == self.model {
+            return;
+        }
+        self.context_window = context_window(&model);
+        self.model = model;
+        self.estimated = true;
     }
 
     pub fn reset_baseline(&mut self) {
@@ -270,6 +279,27 @@ mod tests {
 
         session.record_request(MODEL.into(), cached(80_000), "09:40".into());
         assert_eq!(session.new_context_label(), "+13.2K");
+    }
+
+    #[test]
+    fn model_switch_rebaselines_without_growth_or_compaction() {
+        let mut session = Session::new("s1".into());
+        session.record_request(MODEL.into(), cached(50_000), "09:00".into());
+        session.record_request(MODEL.into(), cached(100_000), "09:10".into());
+
+        session.record_model_switch("claude-haiku-4-5".into());
+        assert_eq!(session.model, "claude-haiku-4-5");
+        assert_eq!(session.latest_label(), "≈ 100.0K / 200.0K (50%)");
+
+        session.record_request("claude-haiku-4-5".into(), cached(96_000), "09:20".into());
+        assert_eq!(session.latest_label(), "96.0K / 200.0K (48%)");
+        assert_eq!(session.compactions, 0);
+        assert_eq!(session.new_context_label(), "+50.0K");
+
+        session.record_request(MODEL.into(), cached(104_000), "09:30".into());
+        assert_eq!(session.new_context_label(), "+50.0K");
+        session.record_request(MODEL.into(), cached(110_000), "09:40".into());
+        assert_eq!(session.new_context_label(), "+56.0K");
     }
 
     #[test]

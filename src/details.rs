@@ -110,7 +110,7 @@ fn categories(ui: &Ui, session: &Session, overhead: &Overhead) -> [Category; 6] 
             tokens: session.conversation_context(),
             color: MESSAGES_COLOR,
             estimated: session.estimated,
-            hint: "Measured: messages, tool results and thinking added after the first request. Estimated from the compaction summary until the next request",
+            hint: "Measured: messages, tool results and thinking added after the first request. Estimated after /compact or /model until the next request",
         },
         Category {
             name: "Free space",

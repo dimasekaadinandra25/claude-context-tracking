@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const SYNTHETIC_MODEL: &str = "<synthetic>";
+const MODEL_SWITCH_MARKER: &str = r#""content":"<local-command-stdout>Set model to `"#;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +128,12 @@ impl Index {
             }
             return;
         }
+        if let Some(model) = switched_model(line) {
+            if at >= session.latest_at {
+                session.record_model_switch(model);
+            }
+            return;
+        }
         let Some(Message {
             id: Some(message_id),
             model: Some(model),
@@ -143,6 +150,18 @@ impl Index {
         }
         session.record_request(model, usage, at);
     }
+}
+
+fn switched_model(line: &str) -> Option<String> {
+    let rest = &line[line.find(MODEL_SWITCH_MARKER)? + MODEL_SWITCH_MARKER.len()..];
+    let name = rest[..rest.find('`')?].split('[').next()?.trim();
+    if name.starts_with("claude-") {
+        return Some(name.to_owned());
+    }
+    Some(format!(
+        "claude-{}",
+        name.to_lowercase().replace([' ', '.'], "-")
+    ))
 }
 
 #[cfg(test)]
@@ -197,6 +216,33 @@ mod tests {
         assert_eq!(session.compactions, 1);
         assert_eq!(session.latest_context, 60_000);
         assert!(session.estimated);
+    }
+
+    #[test]
+    fn model_command_switches_model_right_away() {
+        let mut index = Index::default();
+        index.ingest(&request("s1", "m1", "2026-01-01T00:00:00Z", 40_000), "file");
+        index.ingest(
+            r#"{"type":"user","sessionId":"s1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":[{"type":"tool_result","content":"{\"content\":\"<local-command-stdout>Set model to `claude-haiku-4-5`"}]}}"#,
+            "file",
+        );
+        assert_eq!(index.sessions["s1"].model, "claude-opus-5-5");
+
+        index.ingest(
+            r#"{"type":"user","sessionId":"s1","timestamp":"2026-01-01T00:02:00Z","message":{"role":"user","content":"<local-command-stdout>Set model to `claude-sonnet-5-5[1m]`</local-command-stdout>"}}"#,
+            "file",
+        );
+        let session = &index.sessions["s1"];
+        assert_eq!(session.model, "claude-sonnet-5-5");
+        assert!(session.estimated);
+
+        index.ingest(
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Set model to `Haiku 4.5` for this session only</local-command-stdout>","sessionId":"s1","timestamp":"2026-01-01T00:03:00Z"}"#,
+            "file",
+        );
+        let session = &index.sessions["s1"];
+        assert_eq!(session.model, "claude-haiku-4-5");
+        assert_eq!(session.context_window, 200_000);
     }
 
     #[test]
