@@ -115,6 +115,7 @@ Hover over a session's context bar (marked ⓘ) to see a breakdown; click it to 
 | Memory files | Each loaded memory file (`CLAUDE.md` files, `CLAUDE.local.md`, the project's auto-memory `MEMORY.md`) with its estimated tokens |
 | Custom agents | Each custom agent from your agent folders and enabled plugins with its estimated tokens |
 | Latest request | Cache read, cache write, uncached input and output tokens of the most recent request |
+| New context by model | How much of **New context** each model added, when the session grew (one row per model) |
 | Session | Start, new and peak context, compactions, request count, first and last request time (UTC), project path and session id |
 
 How the categories are worked out:

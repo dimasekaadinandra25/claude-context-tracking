@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
@@ -30,6 +31,7 @@ pub struct Session {
     pub start_context: u64,
     pub latest_context: u64,
     pub new_context: u64,
+    pub new_context_by_model: BTreeMap<String, u64>,
     pub peak_context: u64,
     pub compactions: u32,
     pub requests: u32,
@@ -68,9 +70,11 @@ impl Session {
             self.first_at.clone_from(&at);
         } else if self.estimated || model != self.model {
             self.estimated = false;
-        } else if context >= self.latest_context {
-            self.new_context += context - self.latest_context;
-        } else {
+        } else if context > self.latest_context {
+            let growth = context - self.latest_context;
+            self.new_context += growth;
+            *self.new_context_by_model.entry(model.clone()).or_default() += growth;
+        } else if context < self.latest_context {
             self.compactions += 1;
         }
         self.latest_context = context;
@@ -104,6 +108,7 @@ impl Session {
     pub fn reset_baseline(&mut self) {
         self.start_context = self.latest_context;
         self.new_context = 0;
+        self.new_context_by_model.clear();
         self.compactions = 0;
     }
 
@@ -211,6 +216,7 @@ mod tests {
     use super::*;
 
     const MODEL: &str = "claude-opus-5-5";
+    const SONNET: &str = "claude-sonnet-5-5";
 
     #[test]
     fn context_window_by_model() {
@@ -300,6 +306,17 @@ mod tests {
         assert_eq!(session.new_context_label(), "+50.0K");
         session.record_request(MODEL.into(), cached(110_000), "09:40".into());
         assert_eq!(session.new_context_label(), "+56.0K");
+
+        session.record_request(SONNET.into(), cached(112_000), "09:50".into());
+        session.record_request(SONNET.into(), cached(120_000), "10:00".into());
+        assert_eq!(session.new_context_label(), "+64.0K");
+        assert_eq!(
+            session.new_context_by_model,
+            BTreeMap::from([(MODEL.to_owned(), 56_000), (SONNET.to_owned(), 8_000)])
+        );
+
+        session.reset_baseline();
+        assert!(session.new_context_by_model.is_empty());
     }
 
     #[test]

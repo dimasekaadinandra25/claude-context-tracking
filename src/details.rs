@@ -56,6 +56,16 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
         ],
     );
 
+    if !session.new_context_by_model.is_empty() {
+        section(ui, "NEW CONTEXT BY MODEL");
+        let rows: Vec<(&str, String)> = session
+            .new_context_by_model
+            .iter()
+            .map(|(model, tokens)| (model.as_str(), format!("+{}", format_tokens(*tokens))))
+            .collect();
+        key_values(ui, "new_context_by_model", &rows);
+    }
+
     section(ui, "SESSION");
     key_values(
         ui,
