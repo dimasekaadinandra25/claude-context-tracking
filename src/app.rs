@@ -37,6 +37,7 @@ const CARD_MARGIN: i8 = 11;
 const CARD_SPACING: f32 = 8.0;
 const SEARCH_WIDTH: f32 = 100.0;
 const TOP_ROW_HEIGHT: f32 = 28.0;
+const BANNER_ROW_HEIGHT: f32 = 24.0;
 const LIVE_PILL_WIDTH: f32 = 64.0;
 const PILL_PADDING: f32 = 28.0;
 const SEARCH_ICON_SIZE: f32 = 13.0;
@@ -226,6 +227,9 @@ impl App {
             ui.add(
                 ProgressBar::new(fraction).text(format!("Indexing sessions… {done}/{total} files")),
             );
+        }
+        if needs_api_key(&self.sync) && api_key_banner(ui) {
+            self.settings = Some(Settings::load());
         }
         ui.add_space(6.0);
     }
@@ -627,6 +631,43 @@ fn idle_new_context(session: &Session) -> RichText {
     }
 }
 
+fn needs_api_key(status: &SyncStatus) -> bool {
+    matches!(status, SyncStatus::Off)
+}
+
+fn api_key_banner(ui: &mut Ui) -> bool {
+    ui.add_space(4.0);
+    theme::glass(ui)
+        .stroke((1.0, theme::AMBER.gamma_multiply(0.8)))
+        .inner_margin(egui::Margin::symmetric(12, 6))
+        .show(ui, |ui| {
+            split_row(
+                ui,
+                BANNER_ROW_HEIGHT,
+                |ui| {
+                    ui.add(
+                        egui::Button::new(RichText::new("Add API key").color(egui::Color32::WHITE))
+                            .fill(ACCENT),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                },
+                |ui| {
+                    theme::dot(ui, LIVE_DOT_RADIUS, theme::AMBER);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("Your usage isn't sent to the team dashboard yet")
+                                .color(ui.visuals().strong_text_color()),
+                        )
+                        .truncate(),
+                    );
+                },
+            )
+            .0
+        })
+        .inner
+}
+
 fn search_box(ui: &mut Ui, filter: &mut String) {
     let search_id = egui::Id::unique(SEARCH_ID);
     let focused = ui.memory(|memory| memory.has_focus(search_id));
@@ -823,6 +864,13 @@ mod tests {
             session_id: session_id.into(),
             reason: reason.into(),
         }
+    }
+
+    #[test]
+    fn api_key_banner_only_when_sync_is_off() {
+        assert!(needs_api_key(&SyncStatus::Off));
+        assert!(!needs_api_key(&SyncStatus::Waiting));
+        assert!(!needs_api_key(&SyncStatus::Syncing));
     }
 
     #[test]
