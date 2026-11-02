@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RequestUsage {
     pub input_tokens: u64,
@@ -19,7 +19,7 @@ impl RequestUsage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HourUsage {
     pub new_context: u64,
     pub requests: u32,
@@ -39,7 +39,7 @@ impl HourUsage {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub project: String,
@@ -58,6 +58,7 @@ pub struct Session {
     pub last_usage: RequestUsage,
     pub context_window: u64,
     pub estimated: bool,
+    #[serde(with = "crate::cache::pairs")]
     pub hours: BTreeMap<(String, String), HourUsage>,
     pub compactions_lifetime: u32,
 }

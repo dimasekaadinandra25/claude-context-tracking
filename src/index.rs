@@ -1,6 +1,6 @@
 use crate::platform;
 use crate::session::{RequestUsage, Session};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -38,7 +38,7 @@ struct Message {
     usage: Option<RequestUsage>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Index {
     sessions: HashMap<String, Session>,
     seen_messages: HashSet<String>,
@@ -56,6 +56,12 @@ impl Index {
             on_progress(i + 1, files.len());
         }
         changed
+    }
+
+    pub fn files_intact(&self) -> bool {
+        self.offsets
+            .iter()
+            .all(|(path, &offset)| !std::fs::metadata(path).is_ok_and(|m| m.len() < offset))
     }
 
     pub fn reset_baselines(&mut self) {

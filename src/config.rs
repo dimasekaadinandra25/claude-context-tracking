@@ -17,6 +17,7 @@ pub struct Config {
     pub server_url: String,
     pub api_key: String,
     pub light_mode: bool,
+    pub hide_titles: bool,
 }
 
 impl Config {
@@ -30,7 +31,7 @@ struct SyncState {
     watermark: String,
 }
 
-fn dir() -> PathBuf {
+pub fn dir() -> PathBuf {
     std::env::var_os("CLAUDE_USAGE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -69,10 +70,23 @@ fn with_defaults(mut config: Config) -> Config {
     config
 }
 
-pub fn save_api_key(api_key: &str) -> io::Result<()> {
+pub fn save_settings(api_key: &str, hide_titles: bool) -> io::Result<()> {
     let mut config: Config = read(CONFIG_FILE).unwrap_or_default();
+    let privacy_changed = config.hide_titles != hide_titles;
     api_key.trim().clone_into(&mut config.api_key);
-    write(CONFIG_FILE, &config)
+    config.hide_titles = hide_titles;
+    write(CONFIG_FILE, &config)?;
+    if privacy_changed {
+        reset_watermark()?;
+    }
+    Ok(())
+}
+
+fn reset_watermark() -> io::Result<()> {
+    match std::fs::remove_file(dir().join(STATE_FILE)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 pub fn save_light_mode(light_mode: bool) -> io::Result<()> {

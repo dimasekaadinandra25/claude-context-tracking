@@ -3,6 +3,7 @@
 mod alerts;
 mod app;
 mod autostart;
+mod cache;
 mod config;
 mod details;
 mod export;

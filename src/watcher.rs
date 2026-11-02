@@ -1,3 +1,4 @@
+use crate::cache;
 use crate::export::{to_tsv, write_atomic};
 use crate::index::Index;
 use crate::platform;
@@ -41,12 +42,14 @@ pub fn quit(commands: &Sender<Command>) {
 
 fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
     let root = platform::projects_dir();
-    let mut index = Index::default();
-    index.scan(&root, |done, total| {
+    let cache_file = cache::path();
+    let mut index = cache::load(&cache_file).unwrap_or_default();
+    let scanned = index.scan(&root, |done, total| {
         let _ = tx.send(Update::Indexing { done, total });
         ctx.request_repaint();
     });
     index.reset_baselines();
+    let mut cache = cache::Saver::new(cache_file, scanned);
 
     let machine = platform::machine_name();
     let mut exporter = Exporter::new(machine.clone());
@@ -60,6 +63,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
             ctx.request_repaint();
         }
         exporter.tick(&index);
+        cache.tick(&index);
         if let Some(status) = syncer.tick(&index, &machine) {
             let _ = tx.send(Update::Sync(status));
             ctx.request_repaint();
@@ -67,14 +71,16 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
         match commands.recv_timeout(POLL_INTERVAL) {
             Ok(Command::SyncNow) => syncer.request(),
             Ok(Command::Quit) => {
-                index.scan(&root, |_, _| {});
+                cache.mark(index.scan(&root, |_, _| {}));
                 syncer.run(&index, &machine);
+                cache.flush(&index);
                 std::process::exit(0);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
         changed = index.scan(&root, |_, _| {});
+        cache.mark(changed);
     }
 }
 

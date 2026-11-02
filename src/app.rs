@@ -47,6 +47,7 @@ const SETTINGS_FIELD_WIDTH: f32 = 320.0;
 const SYNC_REASON_CHARS: usize = 60;
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const OVERHEAD_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const PRIVACY_HINT: &str = "Sync sends only models and token counts, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
 const NEW_CONTEXT_HINT: &str = "Context added since start. Keeps counting through /compact: a compaction adds nothing, growth after it adds on top.";
 static NO_OVERHEAD: Overhead = Overhead::EMPTY;
 
@@ -78,6 +79,7 @@ enum IdleSort {
 struct Settings {
     api_key: String,
     start_with_windows: bool,
+    hide_titles: bool,
 }
 
 impl Settings {
@@ -85,11 +87,12 @@ impl Settings {
         Self {
             api_key: config::load().api_key,
             start_with_windows: autostart::is_enabled(),
+            hide_titles: config::load().hide_titles,
         }
     }
 
     fn save(&self) -> bool {
-        config::save_api_key(&self.api_key).is_ok()
+        config::save_settings(&self.api_key, self.hide_titles).is_ok()
             && autostart::set(self.start_with_windows).is_ok()
     }
 }
@@ -357,6 +360,11 @@ impl App {
                 if autostart::SUPPORTED {
                     ui.checkbox(&mut settings.start_with_windows, "Start with Windows");
                 }
+                ui.checkbox(
+                    &mut settings.hide_titles,
+                    "Hide session titles and project names",
+                )
+                .on_hover_text(PRIVACY_HINT);
                 save = ui.button("Save").clicked();
                 ui.label(
                     RichText::new(format!("Version {APP_VERSION}"))

@@ -53,21 +53,28 @@ struct HourPayload<'a> {
 }
 
 impl<'a> Payload<'a> {
-    fn new(machine: &'a str, sessions: &[&'a Session]) -> Self {
+    fn new(machine: &'a str, sessions: &[&'a Session], hide_titles: bool) -> Self {
         Self {
             machine,
             app_version: APP_VERSION,
-            sessions: sessions.iter().map(|s| SessionPayload::from(*s)).collect(),
+            sessions: sessions
+                .iter()
+                .map(|s| SessionPayload::new(s, hide_titles))
+                .collect(),
         }
     }
 }
 
-impl<'a> From<&'a Session> for SessionPayload<'a> {
-    fn from(s: &'a Session) -> Self {
+impl<'a> SessionPayload<'a> {
+    fn new(s: &'a Session, hide_titles: bool) -> Self {
         Self {
             session_id: &s.id,
-            project: folder_name(&s.project),
-            title: s.name(),
+            project: if hide_titles {
+                ""
+            } else {
+                folder_name(&s.project)
+            },
+            title: if hide_titles { "" } else { s.name() },
             model: &s.model,
             context_window: s.context_window,
             start_context: s.base_context,
@@ -225,7 +232,7 @@ fn run_with(
     let mut newest = None;
     let mut rejected = Vec::new();
     for chunk in chunks(sessions, config::load_watermark().as_deref()) {
-        let body = match serde_json::to_string(&Payload::new(machine, &chunk)) {
+        let body = match serde_json::to_string(&Payload::new(machine, &chunk, config.hide_titles)) {
             Ok(body) => body,
             Err(error) => return SyncStatus::Failed(error.to_string()),
         };
@@ -348,7 +355,7 @@ mod tests {
             "2026-10-30T03:20:00Z",
         );
 
-        let json = serde_json::to_value(SessionPayload::from(&session)).unwrap();
+        let json = serde_json::to_value(SessionPayload::new(&session, false)).unwrap();
         let mut keys: Vec<&str> = json
             .as_object()
             .unwrap()
@@ -418,11 +425,23 @@ mod tests {
             ]
         );
 
-        let payload = Payload::new("PC", &[&session]);
+        let payload = Payload::new("PC", &[&session], false);
         let json: Value = serde_json::to_value(payload).unwrap();
         assert_eq!(json["machine"], "PC");
         assert_eq!(json["app_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hidden_titles_send_no_title_or_project() {
+        let mut session = session_with_hours(0, 1, 1);
+        session.title = "Client X pricing".into();
+        session.project = r"C:\Code\client-x".into();
+        let json: Value = serde_json::to_value(Payload::new("PC", &[&session], true)).unwrap();
+        let sent = &json["sessions"][0];
+        assert_eq!(sent["title"], "");
+        assert_eq!(sent["project"], "");
+        assert_eq!(sent["model"], session.model.as_str());
     }
 
     #[test]
