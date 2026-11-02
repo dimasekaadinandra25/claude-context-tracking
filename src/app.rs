@@ -2,16 +2,17 @@ use crate::alerts::{self, FullWarnings};
 use crate::autostart;
 use crate::config;
 use crate::details;
+use crate::mini;
 use crate::overhead::{self, Overhead};
-use crate::platform::{self, APP_NAME};
+use crate::platform::{self, APP_NAME, APP_VERSION};
 use crate::session::{Session, format_age, format_tokens, total_new_context};
 use crate::sync::SyncStatus;
 use crate::theme::{self, ACCENT, FULL_AT, LIVE};
 use crate::tray::{self, Tray};
-use crate::watcher::{self, Update};
+use crate::watcher::{self, Command, Update};
 use eframe::egui::{self, Align, Layout, ProgressBar, RichText, Ui, vec2};
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_TEXT_SIZE: f32 = 18.0;
@@ -35,6 +36,11 @@ const FOLD_INDENT: f32 = 22.0;
 const CARD_MARGIN: i8 = 11;
 const CARD_SPACING: f32 = 8.0;
 const SEARCH_WIDTH: f32 = 100.0;
+const TOP_ROW_HEIGHT: f32 = 28.0;
+const LIVE_PILL_WIDTH: f32 = 64.0;
+const PILL_PADDING: f32 = 28.0;
+const SEARCH_ICON_SIZE: f32 = 13.0;
+const SEARCH_HEIGHT: f32 = 20.0;
 const SEARCH_ID: &str = "search";
 const OLDER_THAN: Duration = Duration::from_secs(7 * 86_400);
 const SETTINGS_FIELD_WIDTH: f32 = 320.0;
@@ -46,6 +52,8 @@ static NO_OVERHEAD: Overhead = Overhead::EMPTY;
 
 pub struct App {
     updates: Receiver<Update>,
+    commands: Sender<Command>,
+    mini: Option<egui::Vec2>,
     indexing: Option<(usize, usize)>,
     machine: String,
     sessions: Vec<Session>,
@@ -94,8 +102,12 @@ impl App {
         } else {
             egui::Theme::Dark
         });
+        let (tx, updates) = channel();
+        let commands = watcher::spawn(cc.egui_ctx.clone(), tx.clone());
         Self {
-            updates: watcher::spawn(cc.egui_ctx.clone()),
+            updates,
+            commands: commands.clone(),
+            mini: None,
             indexing: Some((0, 0)),
             machine: platform::machine_name(),
             sessions: Vec::new(),
@@ -103,7 +115,7 @@ impl App {
             details_for: None,
             overheads: HashMap::new(),
             overheads_refreshed: None,
-            tray: tray::spawn(cc.egui_ctx.clone()),
+            tray: tray::spawn(cc.egui_ctx.clone(), tx, commands),
             sync: None,
             settings: None,
             idle_sort: IdleSort::Recent,
@@ -119,20 +131,43 @@ impl App {
         }
     }
 
-    fn apply_updates(&mut self) {
+    fn apply_updates(&mut self, ctx: &egui::Context) {
         let mut latest = None;
+        let mut toggle_mini = false;
         for update in self.updates.try_iter() {
             match update {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
                 Update::Sync(status) => self.sync = Some(status),
+                Update::ToggleMini => toggle_mini = !toggle_mini,
             }
+        }
+        if toggle_mini {
+            self.toggle_mini(ctx);
         }
         if let Some(mut sessions) = latest {
             sessions.sort_by(|a, b| b.latest_at.cmp(&a.latest_at));
             self.sessions = sessions;
             self.indexing = None;
         }
+    }
+
+    fn toggle_mini(&mut self, ctx: &egui::Context) {
+        self.mini = match self.mini.take() {
+            Some(restore) => {
+                mini::leave(ctx, restore);
+                None
+            }
+            None => Some(mini::enter(ctx)),
+        };
+    }
+
+    fn new_context_today(&self) -> u64 {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        alerts::new_context_since(&self.sessions, alerts::day_start(seconds, local_offset()))
     }
 
     fn refresh_alerts(&mut self) {
@@ -144,14 +179,11 @@ impl App {
         let Some(tray) = &self.tray else {
             return;
         };
-        let offset = local_offset();
-        let seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let today = alerts::new_context_since(&self.sessions, alerts::day_start(seconds, offset));
         let sync = self.sync.as_ref().map_or_else(
             || "Sync off".to_owned(),
-            |status| sync_text(status, offset).0,
+            |status| sync_text(status, local_offset()).0,
         );
-        let text = alerts::tray_text(today, active.len(), &sync);
+        let text = alerts::tray_text(self.new_context_today(), active.len(), &sync);
         if text != self.tray_tooltip {
             tray::set_tooltip(tray, &text);
             self.tray_tooltip = text;
@@ -175,33 +207,30 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            theme::logo(ui, LOGO_SIZE);
-            ui.heading(RichText::new(APP_NAME).strong());
-            theme::pill(ui).show(ui, |ui| ui.label(RichText::new(&self.machine).small()));
-            if self.indexing.is_none() {
-                theme::pill(ui)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = DOT_GAP;
-                        theme::dot(ui, LIVE_DOT_RADIUS, LIVE);
-                        ui.label(RichText::new("Live").small().color(LIVE));
-                    })
-                    .response
-                    .on_hover_text("Watching session files; updates within ~2s of each request");
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if settings_button(ui) {
-                    self.settings = Some(Settings::load());
-                }
+        let filter = &mut self.filter;
+        let (machine, live) = (self.machine.as_str(), self.indexing.is_none());
+        let ((settings, mini), ()) = split_row(
+            ui,
+            TOP_ROW_HEIGHT,
+            |ui| {
+                let settings = glyph_button(ui, "⚙", "Settings");
                 mode_button(ui);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .id(egui::Id::unique(SEARCH_ID))
-                        .hint_text("Search  Ctrl+F")
-                        .desired_width(SEARCH_WIDTH),
+                let mini = icon_button(
+                    ui,
+                    theme::Icon::Mini,
+                    "Mini mode: small always-on-top widget",
                 );
-            });
-        });
+                search_box(ui, filter);
+                (settings, mini)
+            },
+            |ui| title_area(ui, machine, live),
+        );
+        if settings {
+            self.settings = Some(Settings::load());
+        }
+        if mini {
+            self.toggle_mini(&ui.ctx().clone());
+        }
         if let Some((done, total)) = self.indexing {
             let fraction = if total == 0 {
                 0.0
@@ -266,6 +295,11 @@ impl App {
                 if let Some(status) = &self.sync {
                     sync_label(ui, status);
                 }
+                if self.sync != Some(SyncStatus::Off)
+                    && icon_button(ui, theme::Icon::Refresh, "Sync now")
+                {
+                    let _ = self.commands.send(Command::SyncNow);
+                }
             },
             |ui| {
                 ui.label(RichText::new("Total new context").weak());
@@ -324,6 +358,11 @@ impl App {
                     ui.checkbox(&mut settings.start_with_windows, "Start with Windows");
                 }
                 save = ui.button("Save").clicked();
+                ui.label(
+                    RichText::new(format!("Version {APP_VERSION}"))
+                        .small()
+                        .weak(),
+                );
             });
         if !open || (save && settings.save()) {
             self.settings = None;
@@ -533,9 +572,20 @@ impl eframe::App for App {
         theme::paint_backdrop(ui);
         self.hide_to_tray_on_close(ui.ctx());
         self.handle_keys(ui.ctx());
-        self.apply_updates();
+        self.apply_updates(ui.ctx());
         self.refresh_overheads();
         self.refresh_alerts();
+        ui.ctx().request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
+        if self.mini.is_some() {
+            let today = self.new_context_today();
+            let back = egui::CentralPanel::default()
+                .show(ui, |ui| mini::show(ui, &self.sessions, today))
+                .inner;
+            if back {
+                self.toggle_mini(ui.ctx());
+            }
+            return;
+        }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("totals").show(ui, |ui| self.totals_bar(ui));
         let mut sort = self.idle_sort;
@@ -548,7 +598,6 @@ impl eframe::App for App {
         }
         self.details_window(ui.ctx());
         self.settings_window(ui.ctx());
-        ui.ctx().request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
     }
 }
 
@@ -582,9 +631,64 @@ fn idle_new_context(session: &Session) -> RichText {
     }
 }
 
-fn settings_button(ui: &mut Ui) -> bool {
-    ui.add(egui::Button::new(RichText::new("⚙").size(ICON_SIZE)).frame(false))
-        .on_hover_text("Settings")
+fn search_box(ui: &mut Ui, filter: &mut String) {
+    let search_id = egui::Id::unique(SEARCH_ID);
+    let focused = ui.memory(|memory| memory.has_focus(search_id));
+    theme::search_field(ui, focused).show(ui, |ui| {
+        ui.add(
+            egui::TextEdit::singleline(filter)
+                .id(search_id)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .align(egui::Align2::LEFT_CENTER)
+                .min_size(vec2(0.0, SEARCH_HEIGHT))
+                .hint_text("Search  Ctrl+F")
+                .desired_width(SEARCH_WIDTH),
+        );
+        theme::icon(ui, theme::Icon::Search, SEARCH_ICON_SIZE);
+    });
+}
+
+fn title_area(ui: &mut Ui, machine: &str, live: bool) {
+    theme::logo(ui, LOGO_SIZE);
+    ui.heading(RichText::new(APP_NAME).strong())
+        .on_hover_text(machine);
+    let live_width = if live { LIVE_PILL_WIDTH } else { 0.0 };
+    let machine_width = ui
+        .painter()
+        .layout_no_wrap(
+            machine.to_owned(),
+            egui::TextStyle::Small.resolve(ui.style()),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x
+        + PILL_PADDING;
+    if ui.available_width() >= machine_width + live_width {
+        theme::pill(ui).show(ui, |ui| ui.label(RichText::new(machine).small()));
+    }
+    if live && ui.available_width() >= LIVE_PILL_WIDTH {
+        theme::pill(ui)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = DOT_GAP;
+                theme::dot(ui, LIVE_DOT_RADIUS, LIVE);
+                ui.label(RichText::new("Live").small().color(LIVE));
+            })
+            .response
+            .on_hover_text("Watching session files; updates within ~2s of each request");
+    }
+}
+
+fn glyph_button(ui: &mut Ui, glyph: &str, hint: &str) -> bool {
+    ui.add(egui::Button::new(RichText::new(glyph).size(ICON_SIZE)).frame(false))
+        .on_hover_text(hint)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+fn icon_button(ui: &mut Ui, icon: theme::Icon, hint: &str) -> bool {
+    theme::icon_button(ui, icon, ICON_SIZE)
+        .on_hover_text(hint)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
 }

@@ -12,6 +12,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Per session: name, model, start / latest / new context, compactions
 - Aurora Glass look in Claude colors: dark by default, switch to light with the ☀ / 🌙 button (remembered in `config.json`)
 - System tray icon: closing the window hides it to the tray instead of quitting
+- Mini mode: a small always-on-top widget with the context bars of up to two active sessions
 - Tray tooltip shows today's new context, active sessions and the last sync
 - Context warnings: an active card turns amber at 80% and red at 90% of its window, with a one-time desktop notification at 90%
 - Idle list sorts by most recent or largest context; sessions idle for more than 7 days fold into "Older than 7 days"
@@ -20,7 +21,8 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Runs as a single instance: launching it again while it runs does nothing
 - Optional **Start with Windows** (in ⚙ Settings)
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
-- Optionally syncs usage to a team server every 30 minutes
+- Optionally syncs usage to a team server every 30 minutes, on demand with **Sync now**, and once more on **Quit**
+- Windows installer (Inno Setup) built by CI
 - Runs on Windows, macOS and Linux
 
 > Only **Claude Code** sessions (CLI and IDE extensions) are tracked. claude.ai web/desktop/mobile chats are stored on Anthropic's servers, not on your disk, so they can't be read.
@@ -63,6 +65,18 @@ The binary is self-contained. Copy it anywhere and run it; Rust is only needed t
 ### Prebuilt binaries (GitHub Actions)
 
 Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml), which tests and builds the app on Windows, macOS and Linux. Download the binaries from the run's **Artifacts** section on the repository's **Actions** tab. You can also start a build manually there with **Run workflow**.
+
+### Windows installer
+
+The Windows job also builds `claude-usage-monitor-setup-<version>.exe` (artifact **claude-usage-monitor-setup**) from [`installer/claude-usage-monitor.iss`](installer/claude-usage-monitor.iss) with [Inno Setup 6](https://jrsoftware.org/isinfo.php), using the version from `Cargo.toml`. It installs the app to `Program Files\Claude Usage Monitor`, adds a Start-menu shortcut (and a desktop shortcut if you tick it), registers an uninstaller, and offers **Launch now** at the end. Running it again upgrades in place; it closes a running copy first. Uninstalling also removes the **Start with Windows** entry.
+
+To build it locally after `cargo build --release`:
+
+```sh
+iscc /DAppVersion=0.2.0 installer\claude-usage-monitor.iss
+```
+
+The setup file lands in `target\installer\`.
 
 ### Other commands
 
@@ -150,10 +164,16 @@ Sessions are listed most recently used first. Use the search box to filter by se
 | Minimize | Normal minimize to the taskbar/dock |
 | Left-click tray icon | Shows the window again (Windows, macOS) |
 | Right-click tray icon → **Show** | Shows the window |
+| Right-click tray icon → **Mini mode** | Shows the window as a small always-on-top widget, or switches back (see below) |
+| Right-click tray icon → **Sync now** | Sends usage to the server right away (see the sync section) |
 | Right-click tray icon → **Open data file** | Opens `usage.txt` in your default text editor |
-| Right-click tray icon → **Quit** | Exits the app completely |
+| Right-click tray icon → **Quit** | Sends one final sync (at most ~5 seconds), then exits the app completely |
 
 The tray icon stays visible as long as the app is running.
+
+### Mini mode
+
+Click **🗗** in the top bar (or tray → **Mini mode**) to shrink the window to a small widget that stays on top of other windows. It shows one line per active session (up to two): the live dot, the session name and its context bar with the percentage. With no active session it shows `No active session` and today's new context. Double-click anywhere in the widget, or use the tray item again, to return to the full window at its previous size. The theme and backdrop are the same as in the full window.
 
 ### Data file
 
@@ -183,7 +203,7 @@ The app can send each session's usage to a `claude-usage-server` so a team dashb
 1. Ask your admin for an API key.
 2. Click the **⚙** button in the top bar to open **Settings**, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
 
-The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). The bottom bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
+The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. Click **⟳** next to the sync status in the bottom bar, or tray → **Sync now**, to send right away. Tray → **Quit** sends once more before exiting so the dashboard is current; if the server doesn't answer within about 5 seconds the app exits anyway and the data goes out on the next start. Closing the window only hides it, so it doesn't sync. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). Each hour row also carries the billed input tokens: uncached input, cache write and cache read, summed over every request of the main thread and its subagents (subagents run their own billed requests). Every send includes the app version in the `X-App-Version` header; the version is also shown at the bottom of **⚙ Settings**. The bottom bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
 
 Settings live in `config.json` and the sync position in `sync_state.json`:
 

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const APP_NAME: &str = "Claude Usage Monitor";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DATA_DIR_NAME: &str = "ClaudeUsageMonitor";
 
 pub fn claude_dir() -> PathBuf {

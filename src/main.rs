@@ -7,6 +7,7 @@ mod config;
 mod details;
 mod export;
 mod index;
+mod mini;
 mod overhead;
 mod platform;
 mod session;

@@ -1,6 +1,6 @@
 use eframe::egui::{
     Color32, Context, CornerRadius, Frame, LayerId, Margin, Mesh, Painter, Rect, Response, Sense,
-    Shadow, Stroke, TextStyle, Theme, Ui, Vec2, Visuals, pos2, vec2,
+    Shadow, Shape, Stroke, TextStyle, Theme, Ui, Vec2, Visuals, pos2, vec2,
 };
 use std::f32::consts::TAU;
 
@@ -24,6 +24,9 @@ const HEADING_SIZE: f32 = 14.0;
 const MAX_ZOOM: f32 = 1.5;
 const ZOOM_STEP: f32 = 0.05;
 const GLOW_SEGMENTS: usize = 64;
+const ICON_STROKE: f32 = 1.4;
+const REFRESH_GAP: f32 = 0.9;
+const REFRESH_STEPS: usize = 24;
 const GLOW_MID: f32 = 0.55;
 const GLOW_MID_STRENGTH: f32 = 0.45;
 
@@ -236,6 +239,106 @@ pub fn glass(ui: &Ui) -> Frame {
         })
 }
 
+#[derive(Clone, Copy)]
+pub enum Icon {
+    Mini,
+    Refresh,
+    Search,
+}
+
+pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let color = if response.hovered() {
+        ACCENT
+    } else {
+        ui.visuals().text_color()
+    };
+    paint_icon(ui, rect, icon, color);
+    response
+}
+
+pub fn icon(ui: &mut Ui, icon: Icon, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_icon(ui, rect, icon, ui.visuals().weak_text_color());
+}
+
+fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
+    let stroke = Stroke::new(ICON_STROKE, color);
+    let painter = ui.painter();
+    let unit = rect.width() / 2.0;
+    match icon {
+        Icon::Mini => {
+            let box_size = Vec2::splat(unit * 0.95);
+            let shift = vec2(unit * 0.2, -unit * 0.2);
+            let back = Rect::from_center_size(rect.center() + shift, box_size);
+            let front = Rect::from_center_size(rect.center() - shift, box_size);
+            painter.rect_stroke(back, 2.0, stroke, eframe::egui::StrokeKind::Middle);
+            painter.rect_filled(front, 2.0, palette(ui).window);
+            painter.rect_stroke(front, 2.0, stroke, eframe::egui::StrokeKind::Middle);
+        }
+        Icon::Refresh => {
+            let (points, tip, base) = refresh_arc(rect.center(), unit * 0.62);
+            painter.add(Shape::line(points, stroke));
+            painter.add(Shape::convex_polygon(
+                base.into_iter().chain([tip]).collect(),
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Search => {
+            let lens = rect.center() - Vec2::splat(unit * 0.15);
+            let radius = unit * 0.45;
+            painter.circle_stroke(lens, radius, stroke);
+            let handle = Vec2::splat(std::f32::consts::FRAC_1_SQRT_2);
+            painter.line_segment(
+                [lens + handle * radius, lens + handle * unit * 0.95],
+                stroke,
+            );
+        }
+    }
+}
+
+pub fn search_field(ui: &Ui, focused: bool) -> Frame {
+    let palette = palette(ui);
+    let border = if focused {
+        ACCENT
+    } else {
+        palette.glass_stroke
+    };
+    Frame::new()
+        .fill(palette.field)
+        .stroke(Stroke::new(1.0, border))
+        .corner_radius(PILL_RADIUS)
+        .inner_margin(Margin::symmetric(10, 2))
+}
+
+fn refresh_arc(
+    center: eframe::egui::Pos2,
+    radius: f32,
+) -> (
+    Vec<eframe::egui::Pos2>,
+    eframe::egui::Pos2,
+    [eframe::egui::Pos2; 2],
+) {
+    let start = -TAU / 4.0 + REFRESH_GAP;
+    let sweep = TAU - REFRESH_GAP;
+    let at = |angle: f32| center + vec2(angle.cos(), angle.sin()) * radius;
+    let points: Vec<_> = (0..=REFRESH_STEPS)
+        .map(|i| at(start + sweep * i as f32 / REFRESH_STEPS as f32))
+        .collect();
+    let end_angle = start + sweep;
+    let end = at(end_angle);
+    let tangent = vec2(-end_angle.sin(), end_angle.cos());
+    let normal = vec2(end_angle.cos(), end_angle.sin());
+    let head = radius * 0.55;
+    let tip = end + tangent * head;
+    (
+        points,
+        tip,
+        [end + normal * head * 0.6, end - normal * head * 0.6],
+    )
+}
+
 pub fn dot(ui: &mut Ui, radius: f32, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(radius * 2.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), radius, color);
@@ -315,6 +418,21 @@ mod tests {
         assert!((zoom_for(vec2(840.0, 1000.0)) - 1.5).abs() < 1e-4);
         assert!((zoom_for(vec2(1920.0, 768.0)) - 1.2).abs() < 1e-4);
         assert_eq!(zoom_for(vec2(3840.0, 2160.0)), MAX_ZOOM);
+    }
+
+    #[test]
+    fn refresh_arc_is_centered_with_head_at_the_end() {
+        let center = pos2(10.0, 10.0);
+        let (points, tip, base) = refresh_arc(center, 5.0);
+        assert_eq!(points.len(), REFRESH_STEPS + 1);
+        assert!(
+            points
+                .iter()
+                .all(|p| (p.distance(center) - 5.0).abs() < 1e-3)
+        );
+        let end = *points.last().unwrap();
+        assert!((base[0].distance(end) - base[1].distance(end)).abs() < 1e-3);
+        assert!(tip.distance(end) > 0.0);
     }
 
     #[test]

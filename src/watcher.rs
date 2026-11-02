@@ -4,25 +4,42 @@ use crate::platform;
 use crate::session::Session;
 use crate::sync::{SyncStatus, Syncer};
 use eframe::egui;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const EXPORT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum Update {
     Indexing { done: usize, total: usize },
     Sessions(Vec<Session>),
     Sync(SyncStatus),
+    ToggleMini,
 }
 
-pub fn spawn(ctx: egui::Context) -> Receiver<Update> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || run(&ctx, &tx));
-    rx
+pub enum Command {
+    SyncNow,
+    Quit,
 }
 
-fn run(ctx: &egui::Context, tx: &Sender<Update>) {
+pub fn spawn(ctx: egui::Context, tx: Sender<Update>) -> Sender<Command> {
+    let (commands, rx) = channel();
+    std::thread::spawn(move || run(&ctx, &tx, &rx));
+    commands
+}
+
+pub fn quit(commands: &Sender<Command>) {
+    std::thread::spawn(|| {
+        std::thread::sleep(QUIT_TIMEOUT);
+        std::process::exit(0);
+    });
+    if commands.send(Command::Quit).is_err() {
+        std::process::exit(0);
+    }
+}
+
+fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
     let root = platform::projects_dir();
     let mut index = Index::default();
     index.scan(&root, |done, total| {
@@ -47,7 +64,16 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>) {
             let _ = tx.send(Update::Sync(status));
             ctx.request_repaint();
         }
-        std::thread::sleep(POLL_INTERVAL);
+        match commands.recv_timeout(POLL_INTERVAL) {
+            Ok(Command::SyncNow) => syncer.request(),
+            Ok(Command::Quit) => {
+                index.scan(&root, |_, _| {});
+                syncer.run(&index, &machine);
+                std::process::exit(0);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
         changed = index.scan(&root, |_, _| {});
     }
 }

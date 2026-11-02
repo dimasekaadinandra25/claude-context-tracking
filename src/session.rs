@@ -26,6 +26,17 @@ pub struct HourUsage {
     pub output_tokens: u64,
     pub subagent_requests: u32,
     pub subagent_output_tokens: u64,
+    pub input_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+}
+
+impl HourUsage {
+    fn add_billed(&mut self, usage: &RequestUsage) {
+        self.input_tokens += usage.input_tokens;
+        self.cache_write_tokens += usage.cache_creation_input_tokens;
+        self.cache_read_tokens += usage.cache_read_input_tokens;
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -93,6 +104,7 @@ impl Session {
             hour.new_context += growth;
             hour.requests += 1;
             hour.output_tokens += usage.output_tokens;
+            hour.add_billed(&usage);
         }
         self.latest_context = context;
         self.peak_context = self.peak_context.max(context);
@@ -123,10 +135,11 @@ impl Session {
         Some(self.hours.entry((hour, model.to_owned())).or_default())
     }
 
-    pub fn record_subagent_request(&mut self, model: &str, output_tokens: u64, at: &str) {
+    pub fn record_subagent_request(&mut self, model: &str, usage: RequestUsage, at: &str) {
         if let Some(hour) = self.hour_mut(at, model) {
             hour.subagent_requests += 1;
-            hour.subagent_output_tokens += output_tokens;
+            hour.subagent_output_tokens += usage.output_tokens;
+            hour.add_billed(&usage);
         }
     }
 
@@ -394,6 +407,7 @@ mod tests {
             HourUsage {
                 new_context: 40_000,
                 requests: 2,
+                cache_read_tokens: 80_000,
                 ..HourUsage::default()
             }
         );
@@ -402,6 +416,7 @@ mod tests {
             HourUsage {
                 new_context: 10_000,
                 requests: 1,
+                cache_read_tokens: 70_000,
                 ..HourUsage::default()
             }
         );
@@ -434,14 +449,44 @@ mod tests {
     }
 
     #[test]
+    fn hours_sum_billed_tokens_of_main_and_subagent_requests() {
+        let billed =
+            |input_tokens, cache_creation_input_tokens, cache_read_input_tokens| RequestUsage {
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                output_tokens: 1,
+            };
+        let mut session = Session::new("s1".into());
+        session.record_request(MODEL.into(), billed(2, 8_000, 20_000), hour_at("02:10"));
+        session.record_request(MODEL.into(), billed(3, 1_000, 28_000), hour_at("02:40"));
+        session.record_subagent_request(MODEL, billed(5, 38_000, 0), &hour_at("02:45"));
+        session.record_subagent_request(SONNET, billed(1, 2_000, 4_000), &hour_at("02:50"));
+        session.record_request(MODEL.into(), billed(7, 500, 29_000), hour_at("03:05"));
+
+        let tokens = |usage: HourUsage| {
+            (
+                usage.input_tokens,
+                usage.cache_write_tokens,
+                usage.cache_read_tokens,
+            )
+        };
+        assert_eq!(tokens(hour(&session, "02", MODEL)), (10, 47_000, 48_000));
+        assert_eq!(tokens(hour(&session, "02", SONNET)), (1, 2_000, 4_000));
+        assert_eq!(tokens(hour(&session, "03", MODEL)), (7, 500, 29_000));
+        assert_eq!(hour(&session, "02", MODEL).requests, 2);
+        assert_eq!(hour(&session, "02", MODEL).subagent_requests, 1);
+    }
+
+    #[test]
     fn subagent_usage_does_not_change_context() {
         let mut session = three_hour_session();
         session.reset_baseline();
         let before = session.clone();
 
-        session.record_subagent_request(SONNET, 400, &hour_at("02:30"));
-        session.record_subagent_request(SONNET, 600, &hour_at("02:45"));
-        session.record_subagent_request(MODEL, 900, &hour_at("04:01"));
+        session.record_subagent_request(SONNET, with_output(0, 400), &hour_at("02:30"));
+        session.record_subagent_request(SONNET, with_output(0, 600), &hour_at("02:45"));
+        session.record_subagent_request(MODEL, with_output(0, 900), &hour_at("04:01"));
 
         assert_eq!(
             hour(&session, "02", SONNET),
@@ -511,6 +556,7 @@ mod tests {
             HourUsage {
                 new_context: 0,
                 requests: 1,
+                cache_read_tokens: 90_000,
                 ..HourUsage::default()
             }
         );
@@ -523,6 +569,7 @@ mod tests {
             HourUsage {
                 new_context: 0,
                 requests: 2,
+                cache_read_tokens: 130_000,
                 ..HourUsage::default()
             }
         );

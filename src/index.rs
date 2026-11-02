@@ -121,7 +121,7 @@ impl Index {
         let at = record.timestamp.unwrap_or_default();
         if record.is_sidechain {
             if let Some((model, usage)) = new_request(&mut self.seen_messages, record.message) {
-                session.record_subagent_request(&model, usage.output_tokens, &at);
+                session.record_subagent_request(&model, usage, &at);
             }
             return;
         }
@@ -240,6 +240,10 @@ mod tests {
         assert_eq!(
             (first.subagent_requests, first.subagent_output_tokens),
             (1, 300)
+        );
+        assert_eq!(
+            (first.input_tokens, first.cache_write_tokens, first.requests),
+            (2, 38_186, 0)
         );
         let second = hour_of(&index, "s1", "2026-01-01T10:00:00Z", HAIKU);
         assert_eq!(

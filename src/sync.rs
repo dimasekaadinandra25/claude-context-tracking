@@ -1,5 +1,6 @@
 use crate::config::{self, Config};
 use crate::index::Index;
+use crate::platform::APP_VERSION;
 use crate::session::{Session, unix_seconds};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime};
@@ -46,13 +47,16 @@ struct HourPayload<'a> {
     output_tokens: u64,
     subagent_requests: u32,
     subagent_output_tokens: u64,
+    input_tokens: u64,
+    cache_write_tokens: u64,
+    cache_read_tokens: u64,
 }
 
 impl<'a> Payload<'a> {
     fn new(machine: &'a str, sessions: &[&'a Session]) -> Self {
         Self {
             machine,
-            app_version: env!("CARGO_PKG_VERSION"),
+            app_version: APP_VERSION,
             sessions: sessions.iter().map(|s| SessionPayload::from(*s)).collect(),
         }
     }
@@ -85,6 +89,9 @@ impl<'a> From<&'a Session> for SessionPayload<'a> {
                     output_tokens: usage.output_tokens,
                     subagent_requests: usage.subagent_requests,
                     subagent_output_tokens: usage.subagent_output_tokens,
+                    input_tokens: usage.input_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
                 })
                 .collect(),
         }
@@ -122,6 +129,7 @@ pub struct Syncer {
     started: Instant,
     last_run: Option<Instant>,
     last_config: Config,
+    requested: bool,
 }
 
 impl Syncer {
@@ -130,26 +138,30 @@ impl Syncer {
             started: Instant::now(),
             last_run: None,
             last_config: config::load(),
+            requested: false,
         }
     }
 
+    pub fn request(&mut self) {
+        self.requested = true;
+    }
+
     pub fn tick(&mut self, index: &Index, machine: &str) -> Option<SyncStatus> {
-        let config = config::load();
         let due = match self.last_run {
             Some(at) => at.elapsed() >= SYNC_INTERVAL,
             None => self.started.elapsed() >= STARTUP_DELAY,
         };
-        if !due && config == self.last_config {
+        if !due && !self.requested && config::load() == self.last_config {
             return None;
         }
+        Some(self.run(index, machine))
+    }
+
+    pub fn run(&mut self, index: &Index, machine: &str) -> SyncStatus {
+        self.requested = false;
         self.last_run = Some(Instant::now());
-        self.last_config = config;
-        Some(run_with(
-            post,
-            &self.last_config,
-            &index.snapshot(),
-            machine,
-        ))
+        self.last_config = config::load();
+        run_with(post, &self.last_config, &index.snapshot(), machine)
     }
 }
 
@@ -244,12 +256,11 @@ fn post(url: &str, key: &str, body: &str) -> Result<String, String> {
         .http_status_as_error(false)
         .build()
         .into();
-    let mut response = agent
-        .post(url)
-        .header("X-API-Key", key)
-        .header("Content-Type", "application/json")
-        .send(body)
-        .map_err(|error| error.to_string())?;
+    let mut request = agent.post(url);
+    for (name, value) in headers(key) {
+        request = request.header(name, value);
+    }
+    let mut response = request.send(body).map_err(|error| error.to_string())?;
     let text = response.body_mut().read_to_string().unwrap_or_default();
     if response.status().is_success() {
         return Ok(text);
@@ -259,6 +270,14 @@ fn post(url: &str, key: &str, body: &str) -> Result<String, String> {
         response.status().as_u16(),
         error_message(&text)
     ))
+}
+
+fn headers(key: &str) -> [(&'static str, &str); 3] {
+    [
+        ("X-API-Key", key),
+        ("X-App-Version", APP_VERSION),
+        ("Content-Type", "application/json"),
+    ]
 }
 
 fn error_message(body: &str) -> String {
@@ -318,7 +337,16 @@ mod tests {
             ..cached(30_000)
         };
         session.record_request(MODEL.into(), usage, "2026-10-30T03:05:00Z".into());
-        session.record_subagent_request(MODEL, 900, "2026-10-30T03:20:00Z");
+        session.record_subagent_request(
+            MODEL,
+            RequestUsage {
+                input_tokens: 4,
+                cache_creation_input_tokens: 6_000,
+                output_tokens: 900,
+                ..RequestUsage::default()
+            },
+            "2026-10-30T03:20:00Z",
+        );
 
         let json = serde_json::to_value(SessionPayload::from(&session)).unwrap();
         let mut keys: Vec<&str> = json
@@ -363,6 +391,10 @@ mod tests {
         assert_eq!(json["hours"][1]["output_tokens"], 250);
         assert_eq!(json["hours"][1]["subagent_requests"], 1);
         assert_eq!(json["hours"][1]["subagent_output_tokens"], 900);
+        assert_eq!(json["hours"][0]["cache_read_tokens"], 80_000);
+        assert_eq!(json["hours"][1]["input_tokens"], 4);
+        assert_eq!(json["hours"][1]["cache_write_tokens"], 6_000);
+        assert_eq!(json["hours"][1]["cache_read_tokens"], 30_000);
         let mut hour_keys: Vec<&str> = json["hours"][0]
             .as_object()
             .unwrap()
@@ -373,7 +405,10 @@ mod tests {
         assert_eq!(
             hour_keys,
             [
+                "cache_read_tokens",
+                "cache_write_tokens",
                 "hour",
+                "input_tokens",
                 "model",
                 "new_context",
                 "output_tokens",
@@ -429,13 +464,29 @@ mod tests {
             .values_mut()
             .for_each(|h| h.output_tokens = 5);
         let mut subagent_only = session_with_hours(2, 1, 0);
-        subagent_only.record_subagent_request(MODEL, 0, "2026-10-30T02:00:00Z");
+        subagent_only.record_subagent_request(
+            MODEL,
+            RequestUsage::default(),
+            "2026-10-30T02:00:00Z",
+        );
         let idle = session_with_hours(3, 1, 0);
 
         let sessions = [output_only, subagent_only, idle];
         let cut = chunks(&sessions, None);
         let ids: Vec<&str> = cut.concat().iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    #[test]
+    fn post_sends_key_and_app_version_headers() {
+        assert_eq!(
+            headers("key"),
+            [
+                ("X-API-Key", "key"),
+                ("X-App-Version", "0.2.0"),
+                ("Content-Type", "application/json"),
+            ]
+        );
     }
 
     #[test]
