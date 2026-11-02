@@ -10,6 +10,7 @@ use crate::sync::SyncStatus;
 use crate::theme::{self, ACCENT, FULL_AT, LIVE};
 use crate::tray::{self, Tray};
 use crate::watcher::{self, Command, Update};
+use eframe::egui::collapsing_header::{CollapsingState, paint_default_icon};
 use eframe::egui::{self, Align, Layout, ProgressBar, RichText, Ui, vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -32,7 +33,6 @@ const IDLE_MODEL_WIDTH: f32 = 88.0;
 const IDLE_INSET: i8 = 14;
 const IDLE_PANEL_MARGIN: i8 = 6;
 const SECTION_SPACING: f32 = 4.0;
-const FOLD_INDENT: f32 = 22.0;
 const CARD_MARGIN: i8 = 11;
 const CARD_SPACING: f32 = 8.0;
 const SEARCH_WIDTH: f32 = 100.0;
@@ -405,19 +405,35 @@ impl App {
                     if !recent.is_empty() {
                         ui.add(egui::Separator::default().spacing(0.0));
                     }
-                    ui.spacing_mut().indent = FOLD_INDENT;
+                    let mut fold = CollapsingState::load_with_default_open(
+                        ui.ctx(),
+                        ui.make_persistent_id("older"),
+                        false,
+                    );
                     idle_frame().show(ui, |ui| {
-                        egui::CollapsingHeader::new(
-                            RichText::new(format!("Older than 7 days ({})", older.len()))
-                                .small()
-                                .weak(),
-                        )
-                        .id_salt("older")
-                        .default_open(false)
-                        .show_unindented(ui, |ui| {
-                            ui.add(egui::Separator::default().spacing(0.0));
-                            self.idle_rows(ui, &older, now, &mut opened);
+                        ui.horizontal(|ui| {
+                            fold.show_toggle_button(ui, paint_default_icon);
+                            let label = ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "Older than 7 days ({})",
+                                            older.len()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if label.clicked() {
+                                fold.toggle(ui);
+                            }
                         });
+                    });
+                    fold.show_body_unindented(ui, |ui| {
+                        ui.add(egui::Separator::default().spacing(0.0));
+                        self.idle_rows(ui, &older, now, &mut opened);
                     });
                 });
         });
