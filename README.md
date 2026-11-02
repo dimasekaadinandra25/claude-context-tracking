@@ -16,8 +16,8 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Tray tooltip shows today's new context, active sessions and the last sync
 - Context warnings: an active card turns amber at 80% and red at 90% of its window, with a one-time desktop notification at 90%
 - Idle list sorts by most recent or largest context; sessions idle for more than 7 days fold into "Older than 7 days"
-- Keyboard: `Ctrl+F` focuses search; `Esc` closes the details or settings window, or clears the search
-- The whole UI scales up with the window size, up to 1.5×
+- Keyboard: `Ctrl+F` focuses search; `Esc` closes the details or settings window, clears the search, or leaves mini mode
+- The whole UI scales up with the window size, up to 1.5×; `Ctrl+=` / `Ctrl+-` zoom on top of that and `Ctrl+0` resets (not remembered across restarts)
 - Runs as a single instance: launching it again while it runs does nothing
 - Optional **Start with Windows** (in ⚙ Settings)
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
@@ -96,7 +96,7 @@ Run the binary. A progress bar shows while it indexes your existing sessions; th
 
 ### Reading the window
 
-A session is **active** when its latest request was less than 10 minutes ago and its **New context** is above zero. Active sessions are shown first as glass cards with an orange-to-violet context bar; idle sessions follow in one panel with their model, current context (size and share of the window), new context (`—` when nothing was added) and how long ago they were last used. Your machine name is shown next to the app title.
+A session is **active** when its latest request, including requests of its subagents, was less than 10 minutes ago. Active sessions are shown first as glass cards with an orange-to-violet context bar; idle sessions follow in one panel with their model, current context (size and share of the window), new context (`—` when nothing was added) and how long ago they were last used. Your machine name is shown next to the app title.
 
 | Field | Meaning |
 |---|---|
@@ -107,7 +107,7 @@ A session is **active** when its latest request was less than 10 minutes ago and
 | **New context** | Total context the session has added while the app was running. It only goes up: a compaction adds nothing, and growth after it adds on top. |
 | **Compacted** | How many times the session was compacted (manual `/compact` or auto-compact) since tracking started. Shown on active cards and in the context details |
 
-"Context" is the full prompt sent on a request: input + cache write + cache read tokens. Subagent requests are ignored here, since they run in their own context window; only the server sync counts them (see below). Context windows are 1M tokens for Claude 4.6 and newer models, 200K for older ones.
+"Context" is the full prompt sent on a request: input + cache write + cache read tokens. Subagent requests are ignored here, since they run in their own context window; only the server sync counts them (see below). Context windows are 1M tokens for Claude 4.6 and newer models, 200K for older ones. An older model counts as 1M when it was picked with a 1M variant in `/model` (for example `claude-sonnet-4-5[1m]`), or as soon as one of its requests is larger than 200K.
 
 **Example:** the app starts while a session is at 50K.
 
@@ -138,7 +138,7 @@ Hover over a session's context bar (marked ⓘ) to see a breakdown; click it to 
 | Custom agents | Each custom agent from your agent folders and enabled plugins with its estimated tokens |
 | Latest request | Cache read, cache write, uncached input and output tokens of the most recent request |
 | New context by model | How much of **New context** each model added, when the session grew (one row per model) |
-| Session | Start, new and peak context, compactions, request count, first and last request time (UTC), project path and session id |
+| Session | Start, new and peak context, compactions, request count, first and last request time (local time), project path and session id |
 
 How the categories are worked out:
 
@@ -148,13 +148,13 @@ How the categories are worked out:
 
 Claude Code's `/context` measures each part directly while the session runs, but session files only record token totals per request, so these categories are close but not identical. MCP tools and the autocompact buffer can't be read from disk and stay inside **System prompt & tools**.
 
-### Total new context
+### New context since launch
 
-The bar at the bottom sums **New context** across all sessions in the list (respecting the search filter) and shows how many of them are active.
+The bar at the bottom sums **New context** across all sessions in the list (respecting the search filter) and shows how many of them are active. It counts from when the app started; the tray tooltip and mini mode instead show today's new context across all sessions, counted from local midnight.
 
 ### Search
 
-Sessions are listed most recently used first. Use the search box to filter by session name, model or project path.
+Sessions are listed most recently used first (subagent requests count as use). Use the search box to filter by session name, model or project path. When nothing matches, the list says so; when no sessions exist at all, it shows the folder it reads them from.
 
 ### System tray
 
@@ -173,7 +173,7 @@ The tray icon stays visible as long as the app is running.
 
 ### Mini mode
 
-Click **🗗** in the top bar (or tray → **Mini mode**) to shrink the window to a small widget that stays on top of other windows. It shows one line per active session (up to two): the live dot, the session name and its context bar with the percentage. With no active session it shows `No active session` and today's new context. Double-click anywhere in the widget, or use the tray item again, to return to the full window at its previous size. The theme and backdrop are the same as in the full window.
+Click **🗗** in the top bar (or tray → **Mini mode**) to shrink the window to a small widget that stays on top of other windows. It shows one line per active session (up to two): the live dot, the session name and its context bar with the percentage. With no active session it shows `No active session` and today's new context. Double-click anywhere in the widget, press `Esc`, or use the tray item again to return to the full window at its previous size. The theme and backdrop are the same as in the full window.
 
 ### Data file
 
@@ -203,9 +203,11 @@ The app can send each session's usage to a `claude-usage-server` so a team dashb
 1. Ask your admin for an API key.
 2. Click the **⚙** button in the top bar to open **Settings**, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
 
-The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. Click **⟳** next to the sync status in the bottom bar, or tray → **Sync now**, to send right away. Tray → **Quit** sends once more before exiting so the dashboard is current; if the server doesn't answer within about 5 seconds the app exits anyway and the data goes out on the next start. Closing the window only hides it, so it doesn't sync. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). Each hour row also carries the billed input tokens: uncached input, cache write and cache read, summed over every request of the main thread and its subagents (subagents run their own billed requests). Every send includes the app version in the `X-App-Version` header; the version is also shown at the bottom of **⚙ Settings**. The bottom bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
+The app sends about a minute after startup (until then the status reads `Waiting to sync`), right after you change the API key, server URL or privacy setting, and then every **30 minutes**. Click **⟳** next to the sync status in the bottom bar, or tray → **Sync now**, to send right away. Sending runs in the background and the status reads `Syncing…` meanwhile; the session list keeps updating live. Tray → **Quit** saves the session cache, then sends once more before exiting so the dashboard is current; if the server doesn't answer within about 5 seconds the app exits anyway and the data goes out on the next start. Closing the window only hides it, so it doesn't sync. The first send backfills every past session; later sends only carry sessions with new requests (including subagent requests). Large backfills go out in batches and the sync position advances after each accepted batch, so a failure part way only resends what wasn't accepted yet. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). Each hour row also carries the billed input tokens: uncached input, cache write and cache read, summed over every request of the main thread and its subagents (subagents run their own billed requests). Every send includes the app version in the `X-App-Version` header; the version is also shown at the bottom of **⚙ Settings**. The bottom bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
 
 **Privacy:** tick **Hide session titles and project names** in Settings to send only models and token counts; the dashboard then lists those sessions as "Private session". Changing the setting re-sends every session so titles already on the server are cleared (or restored).
+
+The sync position in `sync_state.json` remembers which server URL, API key (stored only as a hash) and privacy setting it belongs to. Changing any of them starts over with a full backfill, so a new account or server gets every session. Sessions whose transcripts Claude Code has already deleted (see **Session history** below) can't be re-sent.
 
 The app keeps a cache of the parsed sessions in `index_cache.json` next to the settings, so later launches only read what changed in the transcripts instead of re-reading all of them.
 
@@ -217,7 +219,8 @@ Settings live in `config.json` and the sync position in `sync_state.json`:
 | macOS | `~/Library/Application Support/claude-usage-monitor/` |
 | Linux | `~/.config/claude-usage-monitor/` |
 
-The environment variables `CLAUDE_USAGE_SERVER_URL` and `CLAUDE_USAGE_API_KEY` override `config.json`, and `CLAUDE_USAGE_CONFIG_DIR` moves both files to another folder.
+The environment variables `CLAUDE_USAGE_SERVER_URL` and `CLAUDE_USAGE_API_KEY` override `config.json`, and `CLAUDE_USAGE_CONFIG_DIR` moves both files to another folder. When `CLAUDE_USAGE_API_KEY` is set, Settings shows the key field as **Set by environment variable** and never writes that key to `config.json`. If saving the settings fails, the Settings window shows the error.
+
 
 ### Configuration
 

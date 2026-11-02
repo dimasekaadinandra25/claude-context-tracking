@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const FILE_NAME: &str = "index_cache.json";
 const SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -157,7 +157,7 @@ mod tests {
         assert_ne!(stale, text);
         std::fs::write(&file, stale).unwrap();
         assert_eq!(load(&file), None);
-        std::fs::write(&file, text.replacen(r#""format":1"#, r#""format":0"#, 1)).unwrap();
+        std::fs::write(&file, text.replacen(r#""format":2"#, r#""format":0"#, 1)).unwrap();
         assert_eq!(load(&file), None);
         std::fs::write(&file, "{").unwrap();
         assert_eq!(load(&file), None);

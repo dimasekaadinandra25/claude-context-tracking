@@ -1,5 +1,5 @@
 use crate::overhead::{Item, Overhead};
-use crate::session::{Session, format_tokens, share};
+use crate::session::{Session, format_tokens, local_offset, share, unix_seconds};
 use crate::theme::ACCENT;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Ui, vec2};
 
@@ -67,6 +67,7 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
     }
 
     section(ui, "SESSION");
+    let offset = local_offset();
     key_values(
         ui,
         "session",
@@ -76,8 +77,8 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
             ("Peak context", format_tokens(session.peak_context)),
             ("Compactions", session.compactions.to_string()),
             ("Requests", session.requests.to_string()),
-            ("First request", format_timestamp(&session.first_at)),
-            ("Last request", format_timestamp(&session.latest_at)),
+            ("First request", format_timestamp(&session.first_at, offset)),
+            ("Last request", format_timestamp(&session.latest_at, offset)),
         ],
     );
     ui.add_space(4.0);
@@ -236,11 +237,13 @@ fn percent(part: u64, whole: u64) -> String {
     }
 }
 
-fn format_timestamp(at: &str) -> String {
-    match at.get(..16) {
-        Some(minutes) if at.contains('T') => format!("{} UTC", minutes.replace('T', " ")),
-        _ => at.to_owned(),
-    }
+fn format_timestamp(at: &str, utc_offset: i64) -> String {
+    unix_seconds(at)
+        .and_then(|utc| chrono::DateTime::from_timestamp(i64::try_from(utc).ok()? + utc_offset, 0))
+        .map_or_else(
+            || at.to_owned(),
+            |local| local.format("%Y-%m-%d %H:%M").to_string(),
+        )
 }
 
 #[cfg(test)]
@@ -255,11 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_show_minutes_in_utc() {
-        assert_eq!(
-            format_timestamp("2026-10-29T07:06:12.345Z"),
-            "2026-10-29 07:06 UTC"
-        );
-        assert_eq!(format_timestamp(""), "");
+    fn timestamps_show_minutes_in_local_time() {
+        let at = "2026-10-29T20:06:12.345Z";
+        assert_eq!(format_timestamp(at, 0), "2026-10-29 20:06");
+        assert_eq!(format_timestamp(at, 7 * 3_600), "2026-10-30 03:06");
+        assert_eq!(format_timestamp(at, -5 * 3_600), "2026-10-29 15:06");
+        assert_eq!(format_timestamp("", 0), "");
     }
 }

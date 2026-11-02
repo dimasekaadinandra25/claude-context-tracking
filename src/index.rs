@@ -137,9 +137,9 @@ impl Index {
             }
             return;
         }
-        if let Some(model) = switched_model(line) {
+        if let Some((model, long_context)) = switched_model(line) {
             if at >= session.latest_at {
-                session.record_model_switch(model);
+                session.record_model_switch(model, long_context);
             }
             return;
         }
@@ -166,16 +166,16 @@ fn new_request(
     (model != SYNTHETIC_MODEL && seen.insert(id)).then_some((model, usage))
 }
 
-fn switched_model(line: &str) -> Option<String> {
+fn switched_model(line: &str) -> Option<(String, bool)> {
     let rest = &line[line.find(MODEL_SWITCH_MARKER)? + MODEL_SWITCH_MARKER.len()..];
-    let name = rest[..rest.find('`')?].split('[').next()?.trim();
+    let shown = &rest[..rest.find('`')?];
+    let long_context = shown.to_lowercase().contains("1m");
+    let name = shown.split(['[', '(']).next()?.trim();
     if name.starts_with("claude-") {
-        return Some(name.to_owned());
+        return Some((name.to_owned(), long_context));
     }
-    Some(format!(
-        "claude-{}",
-        name.to_lowercase().replace([' ', '.'], "-")
-    ))
+    let model = format!("claude-{}", name.to_lowercase().replace([' ', '.'], "-"));
+    Some((model, long_context))
 }
 
 #[cfg(test)]
@@ -329,6 +329,7 @@ mod tests {
         let session = &index.sessions["s1"];
         assert_eq!(session.model, "claude-sonnet-5-5");
         assert!(session.estimated);
+        assert!(session.long_context);
 
         index.ingest(
             r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Set model to `Haiku 4.5` for this session only</local-command-stdout>","sessionId":"s1","timestamp":"2026-01-01T00:03:00Z"}"#,
@@ -337,6 +338,27 @@ mod tests {
         let session = &index.sessions["s1"];
         assert_eq!(session.model, "claude-haiku-4-5");
         assert_eq!(session.context_window, 200_000);
+    }
+
+    #[test]
+    fn one_million_hint_keeps_long_window_for_older_models() {
+        let mut index = Index::default();
+        index.ingest(&request("s1", "m1", "2026-01-01T00:00:00Z", 40_000), "file");
+        index.ingest(
+            r#"{"type":"user","sessionId":"s1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":"<local-command-stdout>Set model to `claude-sonnet-4-5[1m]`</local-command-stdout>"}}"#,
+            "file",
+        );
+        let session = &index.sessions["s1"];
+        assert_eq!(session.model, "claude-sonnet-4-5");
+        assert_eq!(session.context_window, 1_000_000);
+        assert_eq!(
+            switched_model(&format!("{MODEL_SWITCH_MARKER}Sonnet 4.5 (1M context)`")),
+            Some(("claude-sonnet-4-5".to_owned(), true))
+        );
+        assert_eq!(
+            switched_model(&format!("{MODEL_SWITCH_MARKER}claude-haiku-4-5`")),
+            Some(("claude-haiku-4-5".to_owned(), false))
+        );
     }
 
     #[test]

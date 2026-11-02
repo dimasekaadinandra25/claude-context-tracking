@@ -37,18 +37,14 @@ impl FullWarnings {
         active: impl IntoIterator<Item = &'a Session>,
     ) -> Vec<&'a Session> {
         let mut fresh = Vec::new();
-        let mut keep = HashSet::new();
         for session in active {
             let fraction = session.usage_fraction();
-            let warned = self.warned.contains(&session.id);
-            if fraction >= FULL_AT && !warned {
+            if fraction < WARN_AT {
+                self.warned.remove(&session.id);
+            } else if fraction >= FULL_AT && self.warned.insert(session.id.clone()) {
                 fresh.push(session);
             }
-            if fraction >= FULL_AT || (warned && fraction >= WARN_AT) {
-                keep.insert(session.id.clone());
-            }
         }
-        self.warned = keep;
         fresh
     }
 }
@@ -120,6 +116,15 @@ mod tests {
         assert!(warnings.newly_full([&full]).is_empty());
         assert!(warnings.newly_full([&session("a", 300)]).is_empty());
         assert_eq!(warnings.newly_full([&full]).len(), 1);
+    }
+
+    #[test]
+    fn full_warning_survives_idle_pauses() {
+        let mut warnings = FullWarnings::default();
+        let full = session("a", 950);
+        assert_eq!(warnings.newly_full([&full]).len(), 1);
+        assert!(warnings.newly_full([]).is_empty());
+        assert!(warnings.newly_full([&full]).is_empty());
     }
 
     #[test]

@@ -64,16 +64,17 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
         }
         exporter.tick(&index);
         cache.tick(&index);
-        if let Some(status) = syncer.tick(&index, &machine) {
-            let _ = tx.send(Update::Sync(status));
-            ctx.request_repaint();
-        }
+        let (sync_tx, sync_ctx) = (tx.clone(), ctx.clone());
+        syncer.tick(&index, &machine, move |status| {
+            let _ = sync_tx.send(Update::Sync(status));
+            sync_ctx.request_repaint();
+        });
         match commands.recv_timeout(POLL_INTERVAL) {
             Ok(Command::SyncNow) => syncer.request(),
             Ok(Command::Quit) => {
                 cache.mark(index.scan(&root, |_, _| {}));
-                syncer.run(&index, &machine);
                 cache.flush(&index);
+                syncer.finish(&index, &machine);
                 std::process::exit(0);
             }
             Err(RecvTimeoutError::Timeout) => {}

@@ -1,8 +1,8 @@
 use crate::session::{Session, format_tokens};
-use crate::theme::{self, ACCENT, LIVE, WINDOW_SIZE};
+use crate::theme::{self, ACCENT, LIVE, MIN_WINDOW_SIZE, WINDOW_SIZE};
 use eframe::egui::{
-    Align, Context, Label, Layout, PointerButton, RichText, Ui, Vec2, ViewportCommand, WindowLevel,
-    vec2,
+    Align, Context, Key, Label, Layout, PointerButton, RichText, Ui, Vec2, ViewportCommand,
+    WindowLevel, vec2,
 };
 use std::time::SystemTime;
 
@@ -22,12 +22,16 @@ pub fn enter(ctx: &Context) -> Vec2 {
         .input(|i| i.viewport().inner_rect)
         .map_or(Vec2::from(WINDOW_SIZE), |rect| rect.size() * zoom);
     ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
+    ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::ZERO));
     resize(ctx, SIZE);
     restore
 }
 
 pub fn leave(ctx: &Context, restore: Vec2) {
     ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
+    ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(
+        Vec2::from(MIN_WINDOW_SIZE) / ctx.zoom_factor(),
+    ));
     resize(ctx, restore);
 }
 
@@ -38,26 +42,32 @@ fn resize(ctx: &Context, logical: Vec2) {
 pub fn show(ui: &mut Ui, sessions: &[Session], today: u64) -> bool {
     let active = active(sessions, SystemTime::now());
     let lines = if active.is_empty() { 2 } else { active.len() } as f32;
-    theme::glass(ui).inner_margin(CARD_MARGIN).show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        ui.spacing_mut().item_spacing.y = LINE_GAP;
-        let height = lines * LINE_HEIGHT + (lines - 1.0) * LINE_GAP;
-        ui.add_space(((ui.available_height() - height) / 2.0).max(0.0));
-        if active.is_empty() {
-            line(ui, |ui| ui.label(RichText::new("No active session").weak()));
-            line(ui, |ui| {
-                ui.label(
-                    RichText::new(format!("+{} new context today", format_tokens(today)))
-                        .strong()
-                        .color(ACCENT),
-                )
-            });
-        }
-        for session in active {
-            line(ui, |ui| session_line(ui, session));
-        }
-    });
-    ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
+    theme::glass(ui)
+        .inner_margin(CARD_MARGIN)
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.spacing_mut().item_spacing.y = LINE_GAP;
+            let height = lines * LINE_HEIGHT + (lines - 1.0) * LINE_GAP;
+            ui.add_space(((ui.available_height() - height) / 2.0).max(0.0));
+            if active.is_empty() {
+                line(ui, |ui| ui.label(RichText::new("No active session").weak()));
+                line(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("+{} new context today", format_tokens(today)))
+                            .strong()
+                            .color(ACCENT),
+                    )
+                });
+            }
+            for session in active {
+                line(ui, |ui| session_line(ui, session));
+            }
+        })
+        .response
+        .on_hover_text("Double-click or press Esc to return");
+    ui.input(|i| {
+        i.pointer.button_double_clicked(PointerButton::Primary) || i.key_pressed(Key::Escape)
+    })
 }
 
 fn line<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) {
@@ -117,8 +127,8 @@ mod tests {
     fn shows_first_two_active_sessions() {
         let now = UNIX_EPOCH + Duration::from_secs(1_793_324_739);
         let sessions = [
-            session("idle", 0, "2026-10-30T01:45:00Z"),
-            session("a", 10, "2026-10-30T01:45:00Z"),
+            session("idle", 10, "2026-10-30T01:00:00Z"),
+            session("a", 0, "2026-10-30T01:45:00Z"),
             session("old", 10, "2026-10-30T01:00:00Z"),
             session("b", 10, "2026-10-30T01:44:00Z"),
             session("c", 10, "2026-10-30T01:43:00Z"),

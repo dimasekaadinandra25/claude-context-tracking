@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const STANDARD_WINDOW: u64 = 200_000;
+const LONG_WINDOW: u64 = 1_000_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,6 +49,7 @@ pub struct Session {
     pub model: String,
     pub first_at: String,
     pub latest_at: String,
+    pub subagent_at: String,
     pub base_context: u64,
     pub start_context: u64,
     pub latest_context: u64,
@@ -57,6 +60,7 @@ pub struct Session {
     pub requests: u32,
     pub last_usage: RequestUsage,
     pub context_window: u64,
+    pub long_context: bool,
     pub estimated: bool,
     #[serde(with = "crate::cache::pairs")]
     pub hours: BTreeMap<(String, String), HourUsage>,
@@ -112,7 +116,8 @@ impl Session {
         self.requests += 1;
         self.last_usage = usage;
         self.latest_at = at;
-        self.context_window = context_window(&model);
+        self.long_context |= context > STANDARD_WINDOW;
+        self.context_window = self.window(&model);
         self.model = model;
     }
 
@@ -142,19 +147,36 @@ impl Session {
             hour.subagent_output_tokens += usage.output_tokens;
             hour.add_billed(&usage);
         }
+        if at > self.subagent_at.as_str() {
+            at.clone_into(&mut self.subagent_at);
+        }
+    }
+
+    pub fn last_activity(&self) -> &str {
+        self.latest_at.as_str().max(self.subagent_at.as_str())
     }
 
     pub fn lifetime_new_context(&self) -> u64 {
         self.hours.values().map(|hour| hour.new_context).sum()
     }
 
-    pub fn record_model_switch(&mut self, model: String) {
-        if !self.has_requests() || model == self.model {
+    pub fn record_model_switch(&mut self, model: String, long_context: bool) {
+        let changed = model != self.model || long_context != self.long_context;
+        self.long_context = long_context;
+        if !self.has_requests() || !changed {
             return;
         }
-        self.context_window = context_window(&model);
+        self.context_window = self.window(&model);
         self.model = model;
         self.estimated = true;
+    }
+
+    fn window(&self, model: &str) -> u64 {
+        if self.long_context {
+            LONG_WINDOW
+        } else {
+            context_window(model)
+        }
     }
 
     pub fn reset_baseline(&mut self) {
@@ -207,12 +229,12 @@ impl Session {
     }
 
     pub fn idle_for(&self, now: SystemTime) -> Option<Duration> {
-        let latest = UNIX_EPOCH + Duration::from_secs(unix_seconds(&self.latest_at)?);
+        let latest = UNIX_EPOCH + Duration::from_secs(unix_seconds(self.last_activity())?);
         Some(now.duration_since(latest).unwrap_or_default())
     }
 
     pub fn is_active(&self, now: SystemTime) -> bool {
-        self.new_context > 0 && self.idle_for(now).is_some_and(|idle| idle < ACTIVE_WINDOW)
+        self.idle_for(now).is_some_and(|idle| idle < ACTIVE_WINDOW)
     }
 }
 
@@ -254,10 +276,14 @@ pub fn context_window(model: &str) -> u64 {
         .filter_map(|part| part.parse().ok())
         .collect();
     match version[..] {
-        [major, ..] if major >= 5 => 1_000_000,
-        [4, minor, ..] if minor >= 6 => 1_000_000,
-        _ => 200_000,
+        [major, ..] if major >= 5 => LONG_WINDOW,
+        [4, minor, ..] if minor >= 6 => LONG_WINDOW,
+        _ => STANDARD_WINDOW,
     }
+}
+
+pub fn local_offset() -> i64 {
+    chrono::Local::now().offset().local_minus_utc().into()
 }
 
 pub fn format_tokens(tokens: u64) -> String {
@@ -358,7 +384,7 @@ mod tests {
         session.record_request(MODEL.into(), cached(50_000), "09:00".into());
         session.record_request(MODEL.into(), cached(100_000), "09:10".into());
 
-        session.record_model_switch("claude-haiku-4-5".into());
+        session.record_model_switch("claude-haiku-4-5".into(), false);
         assert_eq!(session.model, "claude-haiku-4-5");
         assert_eq!(session.latest_label(), "≈ 100.0K / 200.0K (50%)");
 
@@ -550,7 +576,7 @@ mod tests {
     #[test]
     fn hours_follow_rebaseline_rules() {
         let mut session = three_hour_session();
-        session.record_model_switch(SONNET.into());
+        session.record_model_switch(SONNET.into(), false);
         session.record_request(SONNET.into(), cached(90_000), hour_at("03:10"));
         assert_eq!(
             hour(&session, "03", SONNET),
@@ -627,8 +653,7 @@ mod tests {
         session.record_request(MODEL.into(), cached(1_000), "2026-10-30T01:40:00Z".into());
         session.record_request(MODEL.into(), cached(1_000), "2026-10-30T01:45:39Z".into());
         let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
-        assert!(!session.is_active(at(1_793_324_739 + 60)));
-        session.record_request(MODEL.into(), cached(2_000), "2026-10-30T01:45:39Z".into());
+        assert_eq!(session.new_context, 0);
         assert!(session.is_active(at(1_793_324_739 + 9 * 60)));
         assert!(!session.is_active(at(1_793_324_739 + 10 * 60)));
         assert!(!Session::new("s2".into()).is_active(at(0)));
@@ -636,6 +661,40 @@ mod tests {
         assert_eq!(format_age(Duration::from_secs(14 * 60)), "14m");
         assert_eq!(format_age(Duration::from_secs(3 * 3_600)), "3h");
         assert_eq!(format_age(Duration::from_secs(50 * 3_600)), "2d");
+    }
+
+    #[test]
+    fn subagent_requests_extend_last_activity() {
+        let mut session = Session::new("s1".into());
+        session.record_request(MODEL.into(), cached(1_000), "2026-10-30T01:00:00Z".into());
+        session.record_subagent_request(MODEL, cached(0), "2026-10-30T01:45:39Z");
+        session.record_subagent_request(MODEL, cached(0), "2026-10-30T01:30:00Z");
+        assert_eq!(session.latest_at, "2026-10-30T01:00:00Z");
+        assert_eq!(session.last_activity(), "2026-10-30T01:45:39Z");
+        let now = UNIX_EPOCH + Duration::from_secs(1_793_324_739 + 5 * 60);
+        assert!(session.is_active(now));
+        assert_eq!(session.idle_for(now), Some(Duration::from_secs(5 * 60)));
+    }
+
+    #[test]
+    fn long_context_comes_from_hint_or_observed_size() {
+        const SONNET_4: &str = "claude-sonnet-4-5";
+        let mut session = Session::new("s1".into());
+        session.record_request(SONNET_4.into(), cached(150_000), "09:00".into());
+        assert_eq!(session.context_window, 200_000);
+        session.record_request(SONNET_4.into(), cached(300_000), "09:10".into());
+        assert_eq!(session.context_window, 1_000_000);
+        assert_eq!(session.latest_label(), "300.0K / 1M (30%)");
+
+        let mut hinted = Session::new("s2".into());
+        hinted.record_model_switch(SONNET_4.into(), true);
+        hinted.record_request(SONNET_4.into(), cached(50_000), "09:00".into());
+        assert_eq!(hinted.context_window, 1_000_000);
+        hinted.record_model_switch(SONNET_4.into(), false);
+        assert_eq!(hinted.context_window, 200_000);
+        assert!(hinted.estimated);
+        hinted.record_model_switch(SONNET_4.into(), true);
+        assert_eq!(hinted.context_window, 1_000_000);
     }
 
     #[test]

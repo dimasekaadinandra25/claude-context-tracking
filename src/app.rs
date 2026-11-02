@@ -1,11 +1,11 @@
 use crate::alerts::{self, FullWarnings};
-use crate::autostart;
 use crate::config;
 use crate::details;
 use crate::mini;
 use crate::overhead::{self, Overhead};
-use crate::platform::{self, APP_NAME, APP_VERSION};
-use crate::session::{Session, format_age, format_tokens, total_new_context};
+use crate::platform::{self, APP_NAME};
+use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
+use crate::settings::Settings;
 use crate::sync::SyncStatus;
 use crate::theme::{self, ACCENT, FULL_AT, LIVE};
 use crate::tray::{self, Tray};
@@ -43,12 +43,12 @@ const SEARCH_ICON_SIZE: f32 = 13.0;
 const SEARCH_HEIGHT: f32 = 20.0;
 const SEARCH_ID: &str = "search";
 const OLDER_THAN: Duration = Duration::from_secs(7 * 86_400);
-const SETTINGS_FIELD_WIDTH: f32 = 320.0;
 const SYNC_REASON_CHARS: usize = 60;
+const EMPTY_STATE_SPACE: f32 = 48.0;
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const OVERHEAD_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const PRIVACY_HINT: &str = "Sync sends only models and token counts, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
 const NEW_CONTEXT_HINT: &str = "Context added since start. Keeps counting through /compact: a compaction adds nothing, growth after it adds on top.";
+const TOTAL_HINT: &str = "New context of the listed sessions since the app started; follows the search filter. The tray shows today's total instead.";
 static NO_OVERHEAD: Overhead = Overhead::EMPTY;
 
 pub struct App {
@@ -63,11 +63,12 @@ pub struct App {
     overheads: HashMap<String, Overhead>,
     overheads_refreshed: Option<Instant>,
     tray: Option<Tray>,
-    sync: Option<SyncStatus>,
+    sync: SyncStatus,
     settings: Option<Settings>,
     idle_sort: IdleSort,
     warnings: FullWarnings,
     tray_tooltip: String,
+    user_zoom: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,31 +77,11 @@ enum IdleSort {
     Largest,
 }
 
-struct Settings {
-    api_key: String,
-    start_with_windows: bool,
-    hide_titles: bool,
-}
-
-impl Settings {
-    fn load() -> Self {
-        Self {
-            api_key: config::load().api_key,
-            start_with_windows: autostart::is_enabled(),
-            hide_titles: config::load().hide_titles,
-        }
-    }
-
-    fn save(&self) -> bool {
-        config::save_settings(&self.api_key, self.hide_titles).is_ok()
-            && autostart::set(self.start_with_windows).is_ok()
-    }
-}
-
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        cc.egui_ctx.set_theme(if config::load().light_mode {
+        let config = config::load();
+        cc.egui_ctx.set_theme(if config.light_mode {
             egui::Theme::Light
         } else {
             egui::Theme::Dark
@@ -119,11 +100,16 @@ impl App {
             overheads: HashMap::new(),
             overheads_refreshed: None,
             tray: tray::spawn(cc.egui_ctx.clone(), tx, commands),
-            sync: None,
+            sync: if config.is_enabled() {
+                SyncStatus::Waiting
+            } else {
+                SyncStatus::Off
+            },
             settings: None,
             idle_sort: IdleSort::Recent,
             warnings: FullWarnings::default(),
             tray_tooltip: String::new(),
+            user_zoom: 1.0,
         }
     }
 
@@ -141,7 +127,7 @@ impl App {
             match update {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
-                Update::Sync(status) => self.sync = Some(status),
+                Update::Sync(status) => self.sync = status,
                 Update::ToggleMini => toggle_mini = !toggle_mini,
             }
         }
@@ -149,7 +135,7 @@ impl App {
             self.toggle_mini(ctx);
         }
         if let Some(mut sessions) = latest {
-            sessions.sort_by(|a, b| b.latest_at.cmp(&a.latest_at));
+            sessions.sort_by(|a, b| b.last_activity().cmp(a.last_activity()));
             self.sessions = sessions;
             self.indexing = None;
         }
@@ -182,10 +168,7 @@ impl App {
         let Some(tray) = &self.tray else {
             return;
         };
-        let sync = self.sync.as_ref().map_or_else(
-            || "Sync off".to_owned(),
-            |status| sync_text(status, local_offset()).0,
-        );
+        let sync = sync_text(&self.sync, local_offset()).0;
         let text = alerts::tray_text(self.new_context_today(), active.len(), &sync);
         if text != self.tray_tooltip {
             tray::set_tooltip(tray, &text);
@@ -284,35 +267,33 @@ impl App {
             .filter(move |s| matches_query(s, &query))
     }
 
-    fn totals_bar(&self, ui: &mut Ui) {
+    fn totals_bar(&mut self, ui: &mut Ui) {
         let now = SystemTime::now();
         let (count, active) = self.visible_sessions().fold((0, 0), |(count, active), s| {
             (count + 1, active + usize::from(s.is_active(now)))
         });
+        let total = total_new_context(self.visible_sessions());
         ui.add_space(4.0);
         split_row(
             ui,
             ROW_HEIGHT,
             |ui| {
                 ui.label(RichText::new(format!("{active} active  ·  {count} sessions")).weak());
-                if let Some(status) = &self.sync {
-                    sync_label(ui, status);
-                }
-                if self.sync != Some(SyncStatus::Off)
+                sync_label(ui, &self.sync);
+                if !matches!(self.sync, SyncStatus::Off | SyncStatus::Syncing)
                     && icon_button(ui, theme::Icon::Refresh, "Sync now")
                 {
+                    self.sync = SyncStatus::Syncing;
                     let _ = self.commands.send(Command::SyncNow);
                 }
             },
             |ui| {
-                ui.label(RichText::new("Total new context").weak());
+                ui.label(RichText::new("New context since launch").weak())
+                    .on_hover_text(TOTAL_HINT);
                 ui.label(
-                    RichText::new(format!(
-                        "+{}",
-                        format_tokens(total_new_context(self.visible_sessions()))
-                    ))
-                    .strong()
-                    .color(ACCENT),
+                    RichText::new(format!("+{}", format_tokens(total)))
+                        .strong()
+                        .color(ACCENT),
                 );
             },
         );
@@ -338,49 +319,25 @@ impl App {
         }
     }
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let Some(settings) = &mut self.settings else {
-            return;
-        };
-        let mut open = true;
-        let mut save = false;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("API key");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut settings.api_key)
-                            .password(true)
-                            .desired_width(SETTINGS_FIELD_WIDTH),
-                    );
-                });
-                if autostart::SUPPORTED {
-                    ui.checkbox(&mut settings.start_with_windows, "Start with Windows");
-                }
-                ui.checkbox(
-                    &mut settings.hide_titles,
-                    "Hide session titles and project names",
-                )
-                .on_hover_text(PRIVACY_HINT);
-                save = ui.button("Save").clicked();
-                ui.label(
-                    RichText::new(format!("Version {APP_VERSION}"))
-                        .small()
-                        .weak(),
-                );
-            });
-        if !open || (save && settings.save()) {
-            self.settings = None;
-        }
-    }
-
     fn sessions_list(&self, ui: &mut Ui, sort: &mut IdleSort) -> Option<String> {
+        if self.sessions.is_empty() {
+            if self.indexing.is_none() {
+                let projects = platform::projects_dir();
+                empty_state(
+                    ui,
+                    "No Claude Code sessions found",
+                    &projects.display().to_string(),
+                );
+            }
+            return None;
+        }
         let now = SystemTime::now();
         let (active, mut idle): (Vec<_>, Vec<_>) =
             self.visible_sessions().partition(|s| s.is_active(now));
+        if active.is_empty() && idle.is_empty() {
+            empty_state(ui, "No sessions match your search", "Esc clears the search");
+            return None;
+        }
         if *sort == IdleSort::Largest {
             idle.sort_by_key(|s| std::cmp::Reverse(s.latest_context));
         }
@@ -591,15 +548,17 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        theme::scale_to_window(ui.ctx());
-        theme::paint_backdrop(ui);
-        self.hide_to_tray_on_close(ui.ctx());
-        self.handle_keys(ui.ctx());
-        self.apply_updates(ui.ctx());
-        self.refresh_overheads();
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.hide_to_tray_on_close(ctx);
+        self.apply_updates(ctx);
         self.refresh_alerts();
-        ui.ctx().request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
+        ctx.request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        theme::scale_to_window(ui.ctx(), &mut self.user_zoom);
+        theme::paint_backdrop(ui);
+        self.refresh_overheads();
         if self.mini.is_some() {
             let today = self.new_context_today();
             let back = egui::CentralPanel::default()
@@ -610,6 +569,7 @@ impl eframe::App for App {
             }
             return;
         }
+        self.handle_keys(ui.ctx());
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("totals").show(ui, |ui| self.totals_bar(ui));
         let mut sort = self.idle_sort;
@@ -621,8 +581,20 @@ impl eframe::App for App {
             self.details_for = opened;
         }
         self.details_window(ui.ctx());
-        self.settings_window(ui.ctx());
+        if let Some(settings) = &mut self.settings
+            && settings.show(ui.ctx())
+        {
+            self.settings = None;
+        }
     }
+}
+
+fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(EMPTY_STATE_SPACE);
+        ui.label(RichText::new(title).strong());
+        ui.label(RichText::new(detail).small().weak());
+    });
 }
 
 fn mode_button(ui: &mut Ui) {
@@ -730,6 +702,8 @@ fn sync_label(ui: &mut Ui, status: &SyncStatus) {
 fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
     match status {
         SyncStatus::Off => ("Sync off".to_owned(), None),
+        SyncStatus::Waiting => ("Waiting to sync".to_owned(), None),
+        SyncStatus::Syncing => ("Syncing…".to_owned(), None),
         SyncStatus::Synced { at, rejected } => {
             let text = format!("Synced {}", clock(*at, utc_offset));
             if rejected.is_empty() {
@@ -758,10 +732,6 @@ fn clock(at: SystemTime, utc_offset: i64) -> String {
     let utc = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let seconds = (i64::try_from(utc).unwrap_or_default() + utc_offset).rem_euclid(86_400);
     format!("{:02}:{:02}", seconds / 3_600, seconds % 3_600 / 60)
-}
-
-fn local_offset() -> i64 {
-    chrono::Local::now().offset().local_minus_utc().into()
 }
 
 fn split_row<R, L>(
@@ -889,6 +859,8 @@ s2: numbers must be >= 0"
             sync_text(&SyncStatus::Off, 0),
             ("Sync off".to_owned(), None)
         );
+        assert_eq!(sync_text(&SyncStatus::Waiting, 0).0, "Waiting to sync");
+        assert_eq!(sync_text(&SyncStatus::Syncing, 0).0, "Syncing…");
         assert_eq!(
             sync_text(&SyncStatus::Failed("HTTP 500: boom".into()), 0),
             (

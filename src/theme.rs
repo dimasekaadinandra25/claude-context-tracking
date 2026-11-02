@@ -1,3 +1,4 @@
+use eframe::egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
 use eframe::egui::{
     Color32, Context, CornerRadius, Frame, LayerId, Margin, Mesh, Painter, Rect, Response, Sense,
     Shadow, Shape, Stroke, TextStyle, Theme, Ui, Vec2, Visuals, pos2, vec2,
@@ -7,6 +8,7 @@ use std::f32::consts::TAU;
 pub const ACCENT: Color32 = Color32::from_rgb(217, 119, 87);
 pub const VIOLET: Color32 = Color32::from_rgb(155, 95, 208);
 pub const WINDOW_SIZE: [f32; 2] = [560.0, 640.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [480.0, 360.0];
 pub const LIVE: Color32 = Color32::from_rgb(79, 195, 161);
 pub const AMBER: Color32 = Color32::from_rgb(227, 182, 92);
 pub const RED: Color32 = Color32::from_rgb(229, 83, 75);
@@ -23,6 +25,9 @@ const SMALL_SIZE: f32 = 10.0;
 const HEADING_SIZE: f32 = 14.0;
 const MAX_ZOOM: f32 = 1.5;
 const ZOOM_STEP: f32 = 0.05;
+const USER_ZOOM_STEP: f32 = 0.1;
+const MIN_USER_ZOOM: f32 = 0.7;
+const MAX_USER_ZOOM: f32 = 2.0;
 const GLOW_SEGMENTS: usize = 64;
 const ICON_STROKE: f32 = 1.4;
 const REFRESH_GAP: f32 = 0.9;
@@ -101,6 +106,7 @@ const LIGHT: Palette = Palette {
 };
 
 pub fn apply(ctx: &Context) {
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
     ctx.set_visuals_of(Theme::Dark, visuals(Visuals::dark(), &DARK));
     ctx.set_visuals_of(Theme::Light, visuals(Visuals::light(), &LIGHT));
     ctx.all_styles_mut(|style| {
@@ -167,9 +173,20 @@ fn visuals(mut visuals: Visuals, palette: &Palette) -> Visuals {
     visuals
 }
 
-pub fn scale_to_window(ctx: &Context) {
+pub fn scale_to_window(ctx: &Context, user_zoom: &mut f32) {
+    *user_zoom = ctx.input_mut(|input| {
+        if input.consume_shortcut(&ZOOM_RESET) {
+            1.0
+        } else if input.consume_shortcut(&ZOOM_IN) || input.consume_shortcut(&ZOOM_IN_SECONDARY) {
+            (*user_zoom + USER_ZOOM_STEP).min(MAX_USER_ZOOM)
+        } else if input.consume_shortcut(&ZOOM_OUT) {
+            (*user_zoom - USER_ZOOM_STEP).max(MIN_USER_ZOOM)
+        } else {
+            *user_zoom
+        }
+    });
     let zoom = ctx.zoom_factor();
-    let target = zoom_for(ctx.content_rect().size() * zoom);
+    let target = zoom_for(ctx.content_rect().size() * zoom) * *user_zoom;
     if (target - zoom).abs() >= ZOOM_STEP / 2.0 {
         ctx.set_zoom_factor(target);
     }

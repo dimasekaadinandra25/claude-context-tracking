@@ -12,6 +12,7 @@ mod mini;
 mod overhead;
 mod platform;
 mod session;
+mod settings;
 mod sync;
 mod theme;
 mod tray;
@@ -35,7 +36,9 @@ fn main() -> eframe::Result {
     }
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size(theme::WINDOW_SIZE),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size(theme::WINDOW_SIZE)
+            .with_min_inner_size(theme::MIN_WINDOW_SIZE),
         ..Default::default()
     };
     eframe::run_native(

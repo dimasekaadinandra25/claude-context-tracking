@@ -1,8 +1,9 @@
-use crate::config::{self, Config};
+use crate::config::{self, Config, SyncIdentity};
 use crate::index::Index;
 use crate::platform::APP_VERSION;
 use crate::session::{Session, unix_seconds};
 use serde::{Deserialize, Serialize};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -125,6 +126,8 @@ struct IngestResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SyncStatus {
     Off,
+    Waiting,
+    Syncing,
     Synced {
         at: SystemTime,
         rejected: Vec<Rejection>,
@@ -135,8 +138,9 @@ pub enum SyncStatus {
 pub struct Syncer {
     started: Instant,
     last_run: Option<Instant>,
-    last_config: Config,
+    last_identity: SyncIdentity,
     requested: bool,
+    running: Option<JoinHandle<()>>,
 }
 
 impl Syncer {
@@ -144,8 +148,9 @@ impl Syncer {
         Self {
             started: Instant::now(),
             last_run: None,
-            last_config: config::load(),
+            last_identity: config::load().sync_identity(),
             requested: false,
+            running: None,
         }
     }
 
@@ -153,32 +158,52 @@ impl Syncer {
         self.requested = true;
     }
 
-    pub fn tick(&mut self, index: &Index, machine: &str) -> Option<SyncStatus> {
+    pub fn tick(
+        &mut self,
+        index: &Index,
+        machine: &str,
+        report: impl Fn(SyncStatus) + Send + 'static,
+    ) {
+        if self.running.as_ref().is_some_and(|run| !run.is_finished()) {
+            return;
+        }
+        let config = config::load();
         let due = match self.last_run {
             Some(at) => at.elapsed() >= SYNC_INTERVAL,
             None => self.started.elapsed() >= STARTUP_DELAY,
         };
-        if !due && !self.requested && config::load() == self.last_config {
-            return None;
+        if !due && !self.requested && config.sync_identity() == self.last_identity {
+            return;
         }
-        Some(self.run(index, machine))
-    }
-
-    pub fn run(&mut self, index: &Index, machine: &str) -> SyncStatus {
         self.requested = false;
         self.last_run = Some(Instant::now());
-        self.last_config = config::load();
-        run_with(post, &self.last_config, &index.snapshot(), machine)
+        self.last_identity = config.sync_identity();
+        if !config.is_enabled() {
+            report(SyncStatus::Off);
+            return;
+        }
+        report(SyncStatus::Syncing);
+        let (sessions, machine) = (index.snapshot(), machine.to_owned());
+        self.running = Some(std::thread::spawn(move || {
+            report(run_with(post, &config, &sessions, &machine));
+        }));
+    }
+
+    pub fn finish(&mut self, index: &Index, machine: &str) {
+        if let Some(run) = self.running.take() {
+            let _ = run.join();
+        }
+        run_with(post, &config::load(), &index.snapshot(), machine);
     }
 }
 
 pub fn chunks<'a>(sessions: &'a [Session], watermark: Option<&str>) -> Vec<Vec<&'a Session>> {
     let mut pending: Vec<&Session> = sessions
         .iter()
-        .filter(|s| watermark.is_none_or(|w| after_overlap(&s.latest_at, w)))
+        .filter(|s| watermark.is_none_or(|w| after_overlap(s.last_activity(), w)))
         .filter(|s| has_usage(s))
         .collect();
-    pending.sort_by(|a, b| a.latest_at.cmp(&b.latest_at));
+    pending.sort_by(|a, b| a.last_activity().cmp(b.last_activity()));
     let mut chunks: Vec<Vec<&Session>> = Vec::new();
     let mut rows = 0;
     for session in pending {
@@ -209,8 +234,8 @@ fn folder_name(path: &str) -> &str {
         .unwrap_or_default()
 }
 
-fn after_overlap(latest_at: &str, watermark: &str) -> bool {
-    match (unix_seconds(latest_at), unix_seconds(watermark)) {
+fn after_overlap(active_at: &str, watermark: &str) -> bool {
+    match (unix_seconds(active_at), unix_seconds(watermark)) {
         (Some(at), Some(mark)) => at + WATERMARK_OVERLAP.as_secs() >= mark,
         _ => true,
     }
@@ -229,9 +254,8 @@ fn run_with(
         "{}{INGEST_PATH}",
         config.server_url.trim().trim_end_matches('/')
     );
-    let mut newest = None;
     let mut rejected = Vec::new();
-    for chunk in chunks(sessions, config::load_watermark().as_deref()) {
+    for chunk in chunks(sessions, config::load_watermark(config).as_deref()) {
         let body = match serde_json::to_string(&Payload::new(machine, &chunk, config.hide_titles)) {
             Ok(body) => body,
             Err(error) => return SyncStatus::Failed(error.to_string()),
@@ -240,14 +264,14 @@ fn run_with(
             Ok(response) => rejected.extend(rejections(&response)),
             Err(reason) => return SyncStatus::Failed(reason),
         }
-        newest = chunk.last().map(|s| s.latest_at.as_str());
+        let newest = chunk.last().map_or("", |s| s.last_activity());
+        if let Err(error) = config::save_watermark(config, newest) {
+            return SyncStatus::Failed(error.to_string());
+        }
     }
-    match newest.map(config::save_watermark) {
-        Some(Err(error)) => SyncStatus::Failed(error.to_string()),
-        _ => SyncStatus::Synced {
-            at: SystemTime::now(),
-            rejected,
-        },
+    SyncStatus::Synced {
+        at: SystemTime::now(),
+        rejected,
     }
 }
 
@@ -297,7 +321,7 @@ fn error_message(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::TempDir;
+    use crate::platform::{TempDir, lock_env};
     use crate::session::{HourUsage, RequestUsage, cached};
     use serde_json::Value;
 
@@ -537,11 +561,24 @@ mod tests {
     }
 
     #[test]
-    fn watermark_holds_on_failure_and_advances_past_rejections() {
+    fn chunks_follow_subagent_activity() {
+        let mut busy = session_with_hours(1, 1, 1);
+        busy.latest_at = "2026-10-30T01:00:00Z".into();
+        busy.record_subagent_request(MODEL, RequestUsage::default(), "2026-10-30T03:30:00Z");
+        let mut quiet = session_with_hours(2, 1, 1);
+        quiet.latest_at = "2026-10-30T03:20:00Z".into();
+        let sessions = [busy, quiet];
+        let cut = chunks(&sessions, Some("2026-10-30T03:00:00Z"));
+        let ids: Vec<&str> = cut.concat().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["s2", "s1"]);
+    }
+
+    #[test]
+    fn watermark_advances_per_chunk_and_past_rejections() {
+        let _env = lock_env();
         let dir = TempDir::new("sync");
         unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
-        let start = "2026-10-30T01:00:00Z";
-        config::save_watermark(start).unwrap();
+        config::save_watermark(&enabled(), "2026-10-30T01:00:00Z").unwrap();
         let sessions: Vec<Session> = (0..250).map(|i| session_with_hours(i, 1, 5)).collect();
 
         let mut calls = 0;
@@ -565,7 +602,10 @@ mod tests {
             status,
             SyncStatus::Failed("HTTP 500: Internal server error".into())
         );
-        assert_eq!(config::load_watermark().as_deref(), Some(start));
+        assert_eq!(
+            config::load_watermark(&enabled()).as_deref(),
+            Some("2026-10-30T02:00:00.199Z")
+        );
 
         let status = run_with(
             |_, _, _| Ok(REJECTED_RESPONSE.to_owned()),
@@ -578,7 +618,7 @@ mod tests {
         };
         assert_eq!(rejected.len(), 2);
         assert_eq!(
-            config::load_watermark().as_deref(),
+            config::load_watermark(&enabled()).as_deref(),
             Some("2026-10-30T02:00:00.249Z")
         );
     }
