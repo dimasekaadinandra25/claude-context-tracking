@@ -180,6 +180,14 @@ impl Session {
         )
     }
 
+    pub fn latest_short_label(&self) -> String {
+        format!(
+            "{} · {:.0}%",
+            self.latest_tokens_label(),
+            self.usage_fraction() * 100.0
+        )
+    }
+
     pub fn new_context_label(&self) -> String {
         format!("+{}", format_tokens(self.new_context))
     }

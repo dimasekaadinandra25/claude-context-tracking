@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod app;
 mod autostart;
 mod config;
@@ -18,8 +19,6 @@ use eframe::egui;
 use std::fs::TryLockError;
 use std::io::Write;
 
-const WINDOW_SIZE: [f32; 2] = [1100.0, 650.0];
-
 fn main() -> eframe::Result {
     install_crash_log();
 
@@ -34,7 +33,7 @@ fn main() -> eframe::Result {
     }
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size(WINDOW_SIZE),
+        viewport: egui::ViewportBuilder::default().with_inner_size(theme::WINDOW_SIZE),
         ..Default::default()
     };
     eframe::run_native(

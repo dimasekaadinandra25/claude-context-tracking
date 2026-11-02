@@ -7,10 +7,10 @@ const PANEL_WIDTH: f32 = 360.0;
 const BAR_HEIGHT: f32 = 8.0;
 const SWATCH_SIZE: f32 = 10.0;
 const SYSTEM_COLOR: Color32 = ACCENT;
-const AGENTS_COLOR: Color32 = Color32::from_rgb(170, 130, 220);
-const MEMORY_COLOR: Color32 = Color32::from_rgb(230, 80, 80);
-const SKILLS_COLOR: Color32 = Color32::from_rgb(110, 210, 190);
-const MESSAGES_COLOR: Color32 = Color32::from_rgb(120, 130, 150);
+const AGENTS_COLOR: Color32 = Color32::from_rgb(177, 123, 224);
+const MEMORY_COLOR: Color32 = Color32::from_rgb(224, 112, 154);
+const SKILLS_COLOR: Color32 = Color32::from_rgb(79, 195, 161);
+const MESSAGES_COLOR: Color32 = Color32::from_rgb(91, 141, 239);
 const ESTIMATE_HINT: &str = "Estimated from files on disk";
 
 struct Category {

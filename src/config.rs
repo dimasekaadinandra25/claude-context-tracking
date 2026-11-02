@@ -16,6 +16,7 @@ const DEFAULT_SERVER_URL: &str = match option_env!("CLAUDE_USAGE_SERVER_URL") {
 pub struct Config {
     pub server_url: String,
     pub api_key: String,
+    pub light_mode: bool,
 }
 
 impl Config {
@@ -74,6 +75,12 @@ pub fn save_api_key(api_key: &str) -> io::Result<()> {
     write(CONFIG_FILE, &config)
 }
 
+pub fn save_light_mode(light_mode: bool) -> io::Result<()> {
+    let mut config: Config = read(CONFIG_FILE).unwrap_or_default();
+    config.light_mode = light_mode;
+    write(CONFIG_FILE, &config)
+}
+
 pub fn load_watermark() -> Option<String> {
     read::<SyncState>(STATE_FILE).map(|state| state.watermark)
 }
@@ -96,6 +103,7 @@ mod tests {
         let key_only = Config {
             server_url: " ".into(),
             api_key: "key".into(),
+            ..Config::default()
         };
         let config = with_defaults(key_only);
         assert_eq!(config.server_url, DEFAULT_SERVER_URL);
@@ -104,6 +112,7 @@ mod tests {
         let custom = Config {
             server_url: "http://team:8080".into(),
             api_key: "key".into(),
+            ..Config::default()
         };
         assert_eq!(with_defaults(custom).server_url, "http://team:8080");
     }

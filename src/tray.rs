@@ -33,6 +33,14 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     rx.recv().unwrap_or(false).then_some(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn set_tooltip(tray: &Tray, text: &str) {
+    let _ = tray.set_tooltip(Some(text));
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_tooltip(_tray: &Tray, _text: &str) {}
+
 pub fn set_window_visible(ctx: &egui::Context, visible: bool) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
     if visible {

@@ -1,3 +1,4 @@
+use crate::alerts::{self, FullWarnings};
 use crate::autostart;
 use crate::config;
 use crate::details;
@@ -5,27 +6,37 @@ use crate::overhead::{self, Overhead};
 use crate::platform::{self, APP_NAME};
 use crate::session::{Session, format_age, format_tokens, total_new_context};
 use crate::sync::SyncStatus;
-use crate::theme::{self, ACCENT};
+use crate::theme::{self, ACCENT, FULL_AT, LIVE};
 use crate::tray::{self, Tray};
 use crate::watcher::{self, Update};
-use eframe::egui::{self, Align, Color32, Layout, ProgressBar, RichText, Ui, vec2};
+use eframe::egui::{self, Align, Layout, ProgressBar, RichText, Ui, vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const LIVE_COLOR: Color32 = Color32::from_rgb(60, 180, 90);
-const ACTIVE_TEXT_SIZE: f32 = 20.0;
-const ACTIVE_ROW_HEIGHT: f32 = 30.0;
-const ACTIVE_BAR_HEIGHT: f32 = 8.0;
-const ROW_HEIGHT: f32 = 22.0;
-const INFO_RADIUS: f32 = 7.0;
-const IDLE_BAR_WIDTH: f32 = 200.0;
-const IDLE_VALUE_WIDTH: f32 = 64.0;
-const IDLE_MODEL_WIDTH: f32 = 110.0;
-const IDLE_INSET: i8 = 16;
-const CARD_MARGIN: i8 = 14;
+const ACTIVE_TEXT_SIZE: f32 = 18.0;
+const NAME_TEXT_SIZE: f32 = 13.0;
+const LOGO_SIZE: f32 = 18.0;
+const LIVE_DOT_RADIUS: f32 = 3.0;
+const ACTIVE_DOT_RADIUS: f32 = 4.0;
+const DOT_GAP: f32 = 5.0;
+const ICON_SIZE: f32 = 16.0;
+const ACTIVE_ROW_HEIGHT: f32 = 24.0;
+const ACTIVE_BAR_HEIGHT: f32 = 7.0;
+const ROW_HEIGHT: f32 = 20.0;
+const INFO_RADIUS: f32 = 6.0;
+const IDLE_VALUE_WIDTH: f32 = 52.0;
+const IDLE_CONTEXT_WIDTH: f32 = 80.0;
+const IDLE_MODEL_WIDTH: f32 = 88.0;
+const IDLE_INSET: i8 = 14;
+const IDLE_PANEL_MARGIN: i8 = 6;
+const SECTION_SPACING: f32 = 4.0;
+const FOLD_INDENT: f32 = 22.0;
+const CARD_MARGIN: i8 = 11;
 const CARD_SPACING: f32 = 8.0;
-const SEARCH_WIDTH: f32 = 220.0;
+const SEARCH_WIDTH: f32 = 100.0;
+const SEARCH_ID: &str = "search";
+const OLDER_THAN: Duration = Duration::from_secs(7 * 86_400);
 const SETTINGS_FIELD_WIDTH: f32 = 320.0;
 const SYNC_REASON_CHARS: usize = 60;
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -45,6 +56,15 @@ pub struct App {
     tray: Option<Tray>,
     sync: Option<SyncStatus>,
     settings: Option<Settings>,
+    idle_sort: IdleSort,
+    warnings: FullWarnings,
+    tray_tooltip: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum IdleSort {
+    Recent,
+    Largest,
 }
 
 struct Settings {
@@ -69,6 +89,11 @@ impl Settings {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        cc.egui_ctx.set_theme(if config::load().light_mode {
+            egui::Theme::Light
+        } else {
+            egui::Theme::Dark
+        });
         Self {
             updates: watcher::spawn(cc.egui_ctx.clone()),
             indexing: Some((0, 0)),
@@ -81,6 +106,9 @@ impl App {
             tray: tray::spawn(cc.egui_ctx.clone()),
             sync: None,
             settings: None,
+            idle_sort: IdleSort::Recent,
+            warnings: FullWarnings::default(),
+            tray_tooltip: String::new(),
         }
     }
 
@@ -107,26 +135,69 @@ impl App {
         }
     }
 
+    fn refresh_alerts(&mut self) {
+        let now = SystemTime::now();
+        let active: Vec<&Session> = self.sessions.iter().filter(|s| s.is_active(now)).collect();
+        for session in self.warnings.newly_full(active.iter().copied()) {
+            alerts::notify_full(session);
+        }
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let offset = local_offset();
+        let seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let today = alerts::new_context_since(&self.sessions, alerts::day_start(seconds, offset));
+        let sync = self.sync.as_ref().map_or_else(
+            || "Sync off".to_owned(),
+            |status| sync_text(status, offset).0,
+        );
+        let text = alerts::tray_text(today, active.len(), &sync);
+        if text != self.tray_tooltip {
+            tray::set_tooltip(tray, &text);
+            self.tray_tooltip = text;
+        }
+    }
+
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        let (find, escape) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if find {
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique(SEARCH_ID)));
+        }
+        if escape && self.settings.take().is_none() && self.details_for.take().is_none() {
+            self.filter.clear();
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            theme::logo(ui, LOGO_SIZE);
             ui.heading(RichText::new(APP_NAME).strong());
-            ui.label(RichText::new(&self.machine).weak());
+            theme::pill(ui).show(ui, |ui| ui.label(RichText::new(&self.machine).small()));
+            if self.indexing.is_none() {
+                theme::pill(ui)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = DOT_GAP;
+                        theme::dot(ui, LIVE_DOT_RADIUS, LIVE);
+                        ui.label(RichText::new("Live").small().color(LIVE));
+                    })
+                    .response
+                    .on_hover_text("Watching session files; updates within ~2s of each request");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if settings_button(ui) {
                     self.settings = Some(Settings::load());
                 }
-                if let Some(status) = &self.sync {
-                    sync_label(ui, status);
-                }
-                if self.indexing.is_none() {
-                    ui.colored_label(LIVE_COLOR, "● Live").on_hover_text(
-                        "Watching session files; updates within ~2s of each request",
-                    );
-                }
+                mode_button(ui);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text("Search sessions")
+                        .id(egui::Id::unique(SEARCH_ID))
+                        .hint_text("Search  Ctrl+F")
                         .desired_width(SEARCH_WIDTH),
                 );
             });
@@ -187,18 +258,27 @@ impl App {
             (count + 1, active + usize::from(s.is_active(now)))
         });
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Total new context").weak());
-            ui.label(
-                RichText::new(format!(
-                    "+{}",
-                    format_tokens(total_new_context(self.visible_sessions()))
-                ))
-                .strong()
-                .color(ACCENT),
-            );
-            ui.label(RichText::new(format!("·  {active} active  ·  {count} sessions")).weak());
-        });
+        split_row(
+            ui,
+            ROW_HEIGHT,
+            |ui| {
+                ui.label(RichText::new(format!("{active} active  ·  {count} sessions")).weak());
+                if let Some(status) = &self.sync {
+                    sync_label(ui, status);
+                }
+            },
+            |ui| {
+                ui.label(RichText::new("Total new context").weak());
+                ui.label(
+                    RichText::new(format!(
+                        "+{}",
+                        format_tokens(total_new_context(self.visible_sessions()))
+                    ))
+                    .strong()
+                    .color(ACCENT),
+                );
+            },
+        );
         ui.add_space(4.0);
     }
 
@@ -250,36 +330,83 @@ impl App {
         }
     }
 
-    fn sessions_list(&self, ui: &mut Ui) -> Option<String> {
+    fn sessions_list(&self, ui: &mut Ui, sort: &mut IdleSort) -> Option<String> {
         let now = SystemTime::now();
-        let (active, idle): (Vec<_>, Vec<_>) =
+        let (active, mut idle): (Vec<_>, Vec<_>) =
             self.visible_sessions().partition(|s| s.is_active(now));
+        if *sort == IdleSort::Largest {
+            idle.sort_by_key(|s| std::cmp::Reverse(s.latest_context));
+        }
+        let (recent, older): (Vec<_>, Vec<_>) = idle
+            .into_iter()
+            .partition(|s| s.idle_for(now).is_none_or(|age| age < OLDER_THAN));
         let mut opened = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if !active.is_empty() {
+                section_label(ui, "ACTIVE");
+            }
             for session in active {
                 if self.active_card(ui, session) {
                     opened = Some(session.id.clone());
                 }
                 ui.add_space(CARD_SPACING);
             }
-            if !idle.is_empty() {
-                ui.add_space(CARD_SPACING);
-                idle_frame().show(ui, |ui| ui.label(RichText::new("IDLE").small().weak()));
+            if recent.is_empty() && older.is_empty() {
+                return;
             }
-            for session in idle {
-                if self.idle_row(ui, session, now) {
-                    opened = Some(session.id.clone());
-                }
-            }
+            ui.add_space(CARD_SPACING);
+            idle_header(ui, sort);
+            theme::glass(ui)
+                .inner_margin(egui::Margin::symmetric(0, IDLE_PANEL_MARGIN))
+                .show(ui, |ui| {
+                    self.idle_rows(ui, &recent, now, &mut opened);
+                    if older.is_empty() {
+                        return;
+                    }
+                    if !recent.is_empty() {
+                        ui.add(egui::Separator::default().spacing(0.0));
+                    }
+                    ui.spacing_mut().indent = FOLD_INDENT;
+                    idle_frame().show(ui, |ui| {
+                        egui::CollapsingHeader::new(
+                            RichText::new(format!("Older than 7 days ({})", older.len()))
+                                .small()
+                                .weak(),
+                        )
+                        .id_salt("older")
+                        .default_open(false)
+                        .show_unindented(ui, |ui| {
+                            ui.add(egui::Separator::default().spacing(0.0));
+                            self.idle_rows(ui, &older, now, &mut opened);
+                        });
+                    });
+                });
         });
         opened
     }
 
+    fn idle_rows(
+        &self,
+        ui: &mut Ui,
+        sessions: &[&Session],
+        now: SystemTime,
+        opened: &mut Option<String>,
+    ) {
+        for (i, session) in sessions.iter().enumerate() {
+            if i > 0 {
+                ui.add(egui::Separator::default().spacing(0.0));
+            }
+            if self.idle_row(ui, session, now) {
+                *opened = Some(session.id.clone());
+            }
+        }
+    }
+
     fn active_card(&self, ui: &mut Ui, session: &Session) -> bool {
-        egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .stroke((1.5, ACCENT))
-            .corner_radius(10)
+        let fraction = session.usage_fraction();
+        let level = theme::level_color(fraction);
+        theme::glass(ui)
+            .stroke((1.0, level.unwrap_or(ACCENT).gamma_multiply(0.7)))
             .inner_margin(CARD_MARGIN)
             .show(ui, |ui| {
                 split_row(
@@ -295,34 +422,37 @@ impl App {
                         .on_hover_text(NEW_CONTEXT_HINT);
                     },
                     |ui| {
-                        ui.label(RichText::new("●").size(ACTIVE_TEXT_SIZE).color(LIVE_COLOR));
+                        theme::dot(ui, ACTIVE_DOT_RADIUS, LIVE);
                         name_label(
                             ui,
                             session,
-                            RichText::new(session.name())
-                                .size(ACTIVE_TEXT_SIZE)
-                                .strong(),
+                            RichText::new(session.name()).size(NAME_TEXT_SIZE).strong(),
                         );
+                        if let Some(color) = level {
+                            let hint = if fraction >= FULL_AT {
+                                "auto-compact near"
+                            } else {
+                                "compact soon"
+                            };
+                            ui.label(
+                                RichText::new(format!("{:.0}% · {hint}", fraction * 100.0))
+                                    .small()
+                                    .color(color),
+                            );
+                        }
                     },
                 );
-                let (info, ()) = split_row(
+                let bar =
+                    self.context_bar(ui, session, vec2(ui.available_width(), ACTIVE_BAR_HEIGHT));
+                let (_, info) = split_row(
                     ui,
                     ROW_HEIGHT,
+                    |ui| ui.label(RichText::new(summary(session)).small().weak()),
                     |ui| {
                         let info = self.info_button(ui, session);
-                        ui.label(RichText::new(session.latest_label()).strong());
+                        ui.label(RichText::new(session.latest_label()).small().weak());
                         info
                     },
-                    |ui| {
-                        ui.label(RichText::new(summary(session)).weak());
-                    },
-                );
-                let bar = self.context_bar(
-                    ui,
-                    session,
-                    ProgressBar::new(session.usage_fraction())
-                        .fill(ACCENT)
-                        .desired_height(ACTIVE_BAR_HEIGHT),
                 );
                 info || bar
             })
@@ -336,46 +466,35 @@ impl App {
                     ui,
                     ROW_HEIGHT,
                     |ui| {
+                        let info = self.info_button(ui, session);
                         let age = session
                             .idle_for(now)
                             .map(|idle| format!("{} ago", format_age(idle)))
                             .unwrap_or_default();
                         fixed_width_label(ui, IDLE_VALUE_WIDTH, RichText::new(age).small().weak());
+                        fixed_width_label(ui, IDLE_VALUE_WIDTH, idle_new_context(session))
+                            .on_hover_text(NEW_CONTEXT_HINT);
                         fixed_width_label(
                             ui,
-                            IDLE_VALUE_WIDTH,
-                            RichText::new(session.new_context_label()).small().weak(),
-                        )
-                        .on_hover_text(NEW_CONTEXT_HINT);
-                        let info = self.info_button(ui, session);
-                        let bar = self.context_bar(
-                            ui,
-                            session,
-                            ProgressBar::new(session.usage_fraction())
-                                .fill(ui.visuals().widgets.noninteractive.bg_stroke.color)
-                                .desired_width(IDLE_BAR_WIDTH)
-                                .text(
-                                    RichText::new(session.latest_label())
-                                        .small()
-                                        .color(ui.visuals().text_color()),
-                                ),
+                            IDLE_CONTEXT_WIDTH,
+                            RichText::new(session.latest_short_label()).small(),
                         );
                         fixed_width_label(
                             ui,
                             IDLE_MODEL_WIDTH,
                             RichText::new(&session.model).small().weak(),
                         );
-                        info || bar
+                        info
                     },
-                    |ui| name_label(ui, session, RichText::new(session.name()).weak()),
+                    |ui| name_label(ui, session, RichText::new(session.name())),
                 )
                 .0
             })
             .inner
     }
 
-    fn context_bar(&self, ui: &mut Ui, session: &Session, bar: ProgressBar) -> bool {
-        let response = ui.add(bar).interact(egui::Sense::click());
+    fn context_bar(&self, ui: &mut Ui, session: &Session, size: egui::Vec2) -> bool {
+        let response = theme::gradient_bar(ui, session.usage_fraction(), size);
         self.details_trigger(response, session)
     }
 
@@ -410,14 +529,20 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        theme::scale_to_window(ui.ctx());
+        theme::paint_backdrop(ui);
         self.hide_to_tray_on_close(ui.ctx());
+        self.handle_keys(ui.ctx());
         self.apply_updates();
         self.refresh_overheads();
+        self.refresh_alerts();
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("totals").show(ui, |ui| self.totals_bar(ui));
+        let mut sort = self.idle_sort;
         let opened = egui::CentralPanel::default()
-            .show(ui, |ui| self.sessions_list(ui))
+            .show(ui, |ui| self.sessions_list(ui, &mut sort))
             .inner;
+        self.idle_sort = sort;
         if opened.is_some() {
             self.details_for = opened;
         }
@@ -427,8 +552,38 @@ impl eframe::App for App {
     }
 }
 
+fn mode_button(ui: &mut Ui) {
+    let dark = ui.visuals().dark_mode;
+    let (icon, hint) = if dark {
+        ("☀", "Switch to light mode")
+    } else {
+        ("🌙", "Switch to dark mode")
+    };
+    let clicked = ui
+        .add(egui::Button::new(RichText::new(icon).size(ICON_SIZE)).frame(false))
+        .on_hover_text(hint)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked();
+    if clicked {
+        ui.ctx().set_theme(if dark {
+            egui::Theme::Light
+        } else {
+            egui::Theme::Dark
+        });
+        let _ = config::save_light_mode(dark);
+    }
+}
+
+fn idle_new_context(session: &Session) -> RichText {
+    if session.new_context == 0 {
+        RichText::new("—").weak()
+    } else {
+        RichText::new(session.new_context_label()).color(ACCENT)
+    }
+}
+
 fn settings_button(ui: &mut Ui) -> bool {
-    ui.add(egui::Button::new(RichText::new("⚙").size(ACTIVE_TEXT_SIZE)).frame(false))
+    ui.add(egui::Button::new(RichText::new("⚙").size(ICON_SIZE)).frame(false))
         .on_hover_text("Settings")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
@@ -436,7 +591,9 @@ fn settings_button(ui: &mut Ui) -> bool {
 
 fn sync_label(ui: &mut Ui, status: &SyncStatus) {
     let (text, hover) = sync_text(status, local_offset());
-    let label = ui.label(RichText::new(text).weak());
+    let label = theme::pill(ui)
+        .show(ui, |ui| ui.label(RichText::new(text).small()))
+        .inner;
     if let Some(hover) = hover {
         label.on_hover_text(hover);
     }
@@ -499,6 +656,26 @@ fn split_row<R, L>(
 
 fn idle_frame() -> egui::Frame {
     egui::Frame::new().inner_margin(egui::Margin::symmetric(IDLE_INSET, 2))
+}
+
+fn idle_header(ui: &mut Ui, sort: &mut IdleSort) {
+    idle_frame().show(ui, |ui| {
+        split_row(
+            ui,
+            ROW_HEIGHT,
+            |ui| {
+                ui.selectable_value(sort, IdleSort::Largest, RichText::new("Largest").small());
+                ui.selectable_value(sort, IdleSort::Recent, RichText::new("Recent").small());
+            },
+            |ui| ui.label(RichText::new("IDLE").small().weak()),
+        );
+    });
+    ui.add_space(SECTION_SPACING);
+}
+
+fn section_label(ui: &mut Ui, text: &str) {
+    idle_frame().show(ui, |ui| ui.label(RichText::new(text).small().weak()));
+    ui.add_space(SECTION_SPACING);
 }
 
 fn fixed_width_label(ui: &mut Ui, width: f32, text: RichText) -> egui::Response {

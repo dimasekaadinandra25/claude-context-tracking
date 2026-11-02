@@ -10,8 +10,13 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Live updates: new requests show up within ~2 seconds
 - Active sessions are highlighted as large cards; idle ones are listed as small grey rows
 - Per session: name, model, start / latest / new context, compactions
-- Claude colors, following your system's light or dark mode
+- Aurora Glass look in Claude colors: dark by default, switch to light with the ☀ / 🌙 button (remembered in `config.json`)
 - System tray icon: closing the window hides it to the tray instead of quitting
+- Tray tooltip shows today's new context, active sessions and the last sync
+- Context warnings: an active card turns amber at 80% and red at 90% of its window, with a one-time desktop notification at 90%
+- Idle list sorts by most recent or largest context; sessions idle for more than 7 days fold into "Older than 7 days"
+- Keyboard: `Ctrl+F` focuses search; `Esc` closes the details or settings window, or clears the search
+- The whole UI scales up with the window size, up to 1.5×
 - Runs as a single instance: launching it again while it runs does nothing
 - Optional **Start with Windows** (in ⚙ Settings)
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
@@ -77,7 +82,7 @@ Run the binary. A progress bar shows while it indexes your existing sessions; th
 
 ### Reading the window
 
-A session is **active** when its latest request was less than 10 minutes ago and its **New context** is above zero. Active sessions are shown first as large cards with an orange context bar; idle sessions follow as small grey rows that also show how long ago they were last used. Your machine name is shown next to the app title.
+A session is **active** when its latest request was less than 10 minutes ago and its **New context** is above zero. Active sessions are shown first as glass cards with an orange-to-violet context bar; idle sessions follow in one panel with their model, current context (size and share of the window), new context (`—` when nothing was added) and how long ago they were last used. Your machine name is shown next to the app title.
 
 | Field | Meaning |
 |---|---|
@@ -178,7 +183,7 @@ The app can send each session's usage to a `claude-usage-server` so a team dashb
 1. Ask your admin for an API key.
 2. Click the **⚙** button in the top bar to open **Settings**, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
 
-The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). The top bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
+The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). The bottom bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
 
 Settings live in `config.json` and the sync position in `sync_state.json`:
 

@@ -302,6 +302,7 @@ mod tests {
         Config {
             server_url: "http://127.0.0.1:1/".into(),
             api_key: "key".into(),
+            ..Config::default()
         }
     }
 
