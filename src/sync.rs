@@ -1,7 +1,7 @@
 use crate::config::{self, Config};
 use crate::index::Index;
 use crate::session::{Session, unix_seconds};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -43,6 +43,9 @@ struct HourPayload<'a> {
     model: &'a str,
     new_context: u64,
     requests: u32,
+    output_tokens: u64,
+    subagent_requests: u32,
+    subagent_output_tokens: u64,
 }
 
 impl<'a> Payload<'a> {
@@ -79,16 +82,39 @@ impl<'a> From<&'a Session> for SessionPayload<'a> {
                     model,
                     new_context: usage.new_context,
                     requests: usage.requests,
+                    output_tokens: usage.output_tokens,
+                    subagent_requests: usage.subagent_requests,
+                    subagent_output_tokens: usage.subagent_output_tokens,
                 })
                 .collect(),
         }
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Rejection {
+    pub session_id: String,
+    pub reason: String,
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    data: IngestResult,
+}
+
+#[derive(Deserialize)]
+struct IngestResult {
+    #[serde(default)]
+    rejected: Vec<Rejection>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SyncStatus {
     Off,
-    Synced(SystemTime),
+    Synced {
+        at: SystemTime,
+        rejected: Vec<Rejection>,
+    },
     Failed(String),
 }
 
@@ -131,7 +157,7 @@ pub fn chunks<'a>(sessions: &'a [Session], watermark: Option<&str>) -> Vec<Vec<&
     let mut pending: Vec<&Session> = sessions
         .iter()
         .filter(|s| watermark.is_none_or(|w| after_overlap(&s.latest_at, w)))
-        .filter(|s| s.lifetime_new_context() > 0)
+        .filter(|s| has_usage(s))
         .collect();
     pending.sort_by(|a, b| a.latest_at.cmp(&b.latest_at));
     let mut chunks: Vec<Vec<&Session>> = Vec::new();
@@ -150,6 +176,13 @@ pub fn chunks<'a>(sessions: &'a [Session], watermark: Option<&str>) -> Vec<Vec<&
     chunks
 }
 
+fn has_usage(session: &Session) -> bool {
+    session
+        .hours
+        .values()
+        .any(|h| h.new_context > 0 || h.output_tokens > 0 || h.subagent_requests > 0)
+}
+
 fn folder_name(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -165,7 +198,7 @@ fn after_overlap(latest_at: &str, watermark: &str) -> bool {
 }
 
 fn run_with(
-    mut post: impl FnMut(&str, &str, &str) -> Result<(), String>,
+    mut post: impl FnMut(&str, &str, &str) -> Result<String, String>,
     config: &Config,
     sessions: &[Session],
     machine: &str,
@@ -178,23 +211,34 @@ fn run_with(
         config.server_url.trim().trim_end_matches('/')
     );
     let mut newest = None;
+    let mut rejected = Vec::new();
     for chunk in chunks(sessions, config::load_watermark().as_deref()) {
         let body = match serde_json::to_string(&Payload::new(machine, &chunk)) {
             Ok(body) => body,
             Err(error) => return SyncStatus::Failed(error.to_string()),
         };
-        if let Err(reason) = post(&url, config.api_key.trim(), &body) {
-            return SyncStatus::Failed(reason);
+        match post(&url, config.api_key.trim(), &body) {
+            Ok(response) => rejected.extend(rejections(&response)),
+            Err(reason) => return SyncStatus::Failed(reason),
         }
         newest = chunk.last().map(|s| s.latest_at.as_str());
     }
     match newest.map(config::save_watermark) {
         Some(Err(error)) => SyncStatus::Failed(error.to_string()),
-        _ => SyncStatus::Synced(SystemTime::now()),
+        _ => SyncStatus::Synced {
+            at: SystemTime::now(),
+            rejected,
+        },
     }
 }
 
-fn post(url: &str, key: &str, body: &str) -> Result<(), String> {
+fn rejections(body: &str) -> Vec<Rejection> {
+    serde_json::from_str::<Envelope>(body)
+        .map(|envelope| envelope.data.rejected)
+        .unwrap_or_default()
+}
+
+fn post(url: &str, key: &str, body: &str) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
@@ -206,10 +250,10 @@ fn post(url: &str, key: &str, body: &str) -> Result<(), String> {
         .header("Content-Type", "application/json")
         .send(body)
         .map_err(|error| error.to_string())?;
-    if response.status().is_success() {
-        return Ok(());
-    }
     let text = response.body_mut().read_to_string().unwrap_or_default();
+    if response.status().is_success() {
+        return Ok(text);
+    }
     Err(format!(
         "HTTP {}: {}",
         response.status().as_u16(),
@@ -228,10 +272,11 @@ fn error_message(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::platform::TempDir;
-    use crate::session::{HourUsage, cached};
+    use crate::session::{HourUsage, RequestUsage, cached};
     use serde_json::Value;
 
     const MODEL: &str = "claude-opus-5-5";
+    const REJECTED_RESPONSE: &str = r#"{"data":{"accepted":0,"rejected":[{"session_id":"s1","reason":"session belongs to another user"}]},"message":"Usage saved"}"#;
 
     fn session_with_hours(id: usize, hours: usize, growth: u64) -> Session {
         let mut session = Session::new(format!("s{id}"));
@@ -242,6 +287,7 @@ mod tests {
                 HourUsage {
                     new_context: growth,
                     requests: 1,
+                    ..HourUsage::default()
                 },
             );
         }
@@ -266,7 +312,12 @@ mod tests {
         session.record_request(MODEL.into(), cached(20_000), "2026-10-30T02:10:00Z".into());
         session.record_request(MODEL.into(), cached(60_000), "2026-10-30T02:50:00Z".into());
         session.reset_baseline();
-        session.record_request(MODEL.into(), cached(30_000), "2026-10-30T03:05:00Z".into());
+        let usage = RequestUsage {
+            output_tokens: 250,
+            ..cached(30_000)
+        };
+        session.record_request(MODEL.into(), usage, "2026-10-30T03:05:00Z".into());
+        session.record_subagent_request(MODEL, 900, "2026-10-30T03:20:00Z");
 
         let json = serde_json::to_value(SessionPayload::from(&session)).unwrap();
         let mut keys: Vec<&str> = json
@@ -308,6 +359,28 @@ mod tests {
         assert_eq!(json["hours"][0]["new_context"], 40_000);
         assert_eq!(json["hours"][0]["requests"], 2);
         assert_eq!(json["hours"][1]["hour"], "2026-10-30T03:00:00Z");
+        assert_eq!(json["hours"][1]["output_tokens"], 250);
+        assert_eq!(json["hours"][1]["subagent_requests"], 1);
+        assert_eq!(json["hours"][1]["subagent_output_tokens"], 900);
+        let mut hour_keys: Vec<&str> = json["hours"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        hour_keys.sort_unstable();
+        assert_eq!(
+            hour_keys,
+            [
+                "hour",
+                "model",
+                "new_context",
+                "output_tokens",
+                "requests",
+                "subagent_output_tokens",
+                "subagent_requests",
+            ]
+        );
 
         let payload = Payload::new("PC", &[&session]);
         let json: Value = serde_json::to_value(payload).unwrap();
@@ -348,6 +421,23 @@ mod tests {
     }
 
     #[test]
+    fn chunks_send_sessions_with_output_or_subagent_usage() {
+        let mut output_only = session_with_hours(1, 1, 0);
+        output_only
+            .hours
+            .values_mut()
+            .for_each(|h| h.output_tokens = 5);
+        let mut subagent_only = session_with_hours(2, 1, 0);
+        subagent_only.record_subagent_request(MODEL, 0, "2026-10-30T02:00:00Z");
+        let idle = session_with_hours(3, 1, 0);
+
+        let sessions = [output_only, subagent_only, idle];
+        let cut = chunks(&sessions, None);
+        let ids: Vec<&str> = cut.concat().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    #[test]
     fn project_is_sent_as_folder_name() {
         assert_eq!(
             folder_name(r"C:\Code\Claude Usage Monitor"),
@@ -376,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_send_keeps_watermark() {
+    fn watermark_holds_on_failure_and_advances_past_rejections() {
         let dir = TempDir::new("sync");
         unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
         let start = "2026-10-30T01:00:00Z";
@@ -393,7 +483,7 @@ mod tests {
                 if calls == 2 {
                     return Err("HTTP 500: Internal server error".into());
                 }
-                Ok(())
+                Ok(String::new())
             },
             &enabled(),
             &sessions,
@@ -406,12 +496,37 @@ mod tests {
         );
         assert_eq!(config::load_watermark().as_deref(), Some(start));
 
-        let status = run_with(|_, _, _| Ok(()), &enabled(), &sessions, "PC");
-        assert!(matches!(status, SyncStatus::Synced(_)));
+        let status = run_with(
+            |_, _, _| Ok(REJECTED_RESPONSE.to_owned()),
+            &enabled(),
+            &sessions,
+            "PC",
+        );
+        let SyncStatus::Synced { rejected, .. } = status else {
+            panic!("expected Synced, got {status:?}");
+        };
+        assert_eq!(rejected.len(), 2);
         assert_eq!(
             config::load_watermark().as_deref(),
             Some("2026-10-30T02:00:00.249Z")
         );
+    }
+
+    #[test]
+    fn rejections_parse_from_response_envelope() {
+        assert_eq!(
+            rejections(REJECTED_RESPONSE),
+            [Rejection {
+                session_id: "s1".into(),
+                reason: "session belongs to another user".into(),
+            }]
+        );
+        assert_eq!(
+            rejections(r#"{"data":{"accepted":3,"rejected":[]},"message":"Usage saved"}"#),
+            []
+        );
+        assert_eq!(rejections(r#"{"data":{"accepted":3},"message":"ok"}"#), []);
+        assert_eq!(rejections("not json"), []);
     }
 
     #[test]
@@ -425,7 +540,7 @@ mod tests {
         let status = run_with(
             |_, _, _| {
                 calls += 1;
-                Ok(())
+                Ok(String::new())
             },
             &config,
             &sessions,

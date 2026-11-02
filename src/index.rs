@@ -118,10 +118,13 @@ impl Index {
         {
             session.project = cwd;
         }
+        let at = record.timestamp.unwrap_or_default();
         if record.is_sidechain {
+            if let Some((model, usage)) = new_request(&mut self.seen_messages, record.message) {
+                session.record_subagent_request(&model, usage.output_tokens, &at);
+            }
             return;
         }
-        let at = record.timestamp.unwrap_or_default();
         if let Some(compaction) = record.compact_metadata {
             if at >= session.latest_at {
                 session.record_compaction(compaction.post_tokens, at);
@@ -134,22 +137,27 @@ impl Index {
             }
             return;
         }
-        let Some(Message {
-            id: Some(message_id),
-            model: Some(model),
-            usage: Some(usage),
-        }) = record.message
-        else {
-            return;
-        };
-        if model == SYNTHETIC_MODEL
-            || !self.seen_messages.insert(message_id)
-            || at < session.latest_at
+        if let Some((model, usage)) = new_request(&mut self.seen_messages, record.message)
+            && at >= session.latest_at
         {
-            return;
+            session.record_request(model, usage, at);
         }
-        session.record_request(model, usage, at);
     }
+}
+
+fn new_request(
+    seen: &mut HashSet<String>,
+    message: Option<Message>,
+) -> Option<(String, RequestUsage)> {
+    let Some(Message {
+        id: Some(id),
+        model: Some(model),
+        usage: Some(usage),
+    }) = message
+    else {
+        return None;
+    };
+    (model != SYNTHETIC_MODEL && seen.insert(id)).then_some((model, usage))
 }
 
 fn switched_model(line: &str) -> Option<String> {
@@ -168,6 +176,9 @@ fn switched_model(line: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::platform::TempDir;
+    use crate::session::HourUsage;
+
+    const HAIKU: &str = "claude-haiku-4-5";
 
     fn request(session: &str, id: &str, at: &str, context: u64) -> String {
         format!(
@@ -197,6 +208,79 @@ mod tests {
         assert_eq!(session.latest_context, 1_102);
         assert_eq!(session.new_context, 0);
         assert_eq!(session.context_window, 1_000_000);
+    }
+
+    fn subagent(session: &str, id: &str, at: &str, model: &str, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"agentId":"a1","sessionId":"{session}","timestamp":"{at}","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":2,"cache_creation_input_tokens":38186,"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    fn hour_of(index: &Index, session: &str, hour: &str, model: &str) -> HourUsage {
+        index.sessions[session].hours[&(hour.to_owned(), model.to_owned())]
+    }
+
+    #[test]
+    fn sidechain_requests_count_as_subagent_usage() {
+        let mut index = Index::default();
+        index.ingest(&request("s1", "m1", "2026-01-01T09:30:00Z", 40_000), "s1");
+        let line = subagent("s1", "a1", "2026-01-01T09:10:00Z", HAIKU, 300);
+        index.ingest(&line, "agent-a1");
+        index.ingest(&line, "agent-a1");
+        index.ingest(
+            &subagent("s1", "a2", "2026-01-01T10:05:00Z", HAIKU, 200),
+            "agent-a1",
+        );
+        index.ingest(
+            &subagent("s1", "a3", "2026-01-01T10:06:00Z", SYNTHETIC_MODEL, 9),
+            "agent-a1",
+        );
+
+        let first = hour_of(&index, "s1", "2026-01-01T09:00:00Z", HAIKU);
+        assert_eq!(
+            (first.subagent_requests, first.subagent_output_tokens),
+            (1, 300)
+        );
+        let second = hour_of(&index, "s1", "2026-01-01T10:00:00Z", HAIKU);
+        assert_eq!(
+            (second.subagent_requests, second.subagent_output_tokens),
+            (1, 200)
+        );
+        let session = &index.sessions["s1"];
+        assert_eq!(session.requests, 1);
+        assert_eq!(session.latest_context, 40_000);
+        assert_eq!(session.latest_at, "2026-01-01T09:30:00Z");
+        assert_eq!(session.model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn subagent_transcript_files_count_toward_parent_session() {
+        let dir = TempDir::new("subagents");
+        let agents = dir.path().join("s1").join("subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            dir.path().join("s1.jsonl"),
+            format!("{}\n", request("s1", "m1", "2026-01-01T09:30:00Z", 40_000)),
+        )
+        .unwrap();
+        std::fs::write(
+            agents.join("agent-a1.jsonl"),
+            format!(
+                "{}\n",
+                subagent("s1", "a1", "2026-01-01T09:10:00Z", HAIKU, 300)
+            ),
+        )
+        .unwrap();
+
+        let mut index = Index::default();
+        index.scan(dir.path(), |_, _| {});
+        let hour = hour_of(&index, "s1", "2026-01-01T09:00:00Z", HAIKU);
+        assert_eq!(
+            (hour.subagent_requests, hour.subagent_output_tokens),
+            (1, 300)
+        );
+        assert!(!index.sessions.contains_key("agent-a1"));
+        assert_eq!(index.sessions["s1"].requests, 1);
     }
 
     #[test]

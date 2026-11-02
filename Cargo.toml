@@ -2,12 +2,13 @@
 name = "claude-usage-monitor"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Desktop tray app that tracks context usage of every local Claude Code session"
 repository = "https://github.com/dimasekaadinandra25/claude-context-tracking"
 readme = "README.md"
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "7.0.0"
 eframe = "0.37.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -17,6 +18,9 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"
 
 [profile.release]
 lto = true

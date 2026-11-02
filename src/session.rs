@@ -23,6 +23,9 @@ impl RequestUsage {
 pub struct HourUsage {
     pub new_context: u64,
     pub requests: u32,
+    pub output_tokens: u64,
+    pub subagent_requests: u32,
+    pub subagent_output_tokens: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -86,7 +89,11 @@ impl Session {
         } else if context < self.latest_context {
             self.count_compaction();
         }
-        self.record_hour(&at, &model, growth);
+        if let Some(hour) = self.hour_mut(&at, &model) {
+            hour.new_context += growth;
+            hour.requests += 1;
+            hour.output_tokens += usage.output_tokens;
+        }
         self.latest_context = context;
         self.peak_context = self.peak_context.max(context);
         self.requests += 1;
@@ -111,13 +118,16 @@ impl Session {
         self.compactions_lifetime += 1;
     }
 
-    fn record_hour(&mut self, at: &str, model: &str, growth: u64) {
-        let Some(hour) = hour_key(at) else {
-            return;
-        };
-        let usage = self.hours.entry((hour, model.to_owned())).or_default();
-        usage.new_context += growth;
-        usage.requests += 1;
+    fn hour_mut(&mut self, at: &str, model: &str) -> Option<&mut HourUsage> {
+        let hour = hour_key(at)?;
+        Some(self.hours.entry((hour, model.to_owned())).or_default())
+    }
+
+    pub fn record_subagent_request(&mut self, model: &str, output_tokens: u64, at: &str) {
+        if let Some(hour) = self.hour_mut(at, model) {
+            hour.subagent_requests += 1;
+            hour.subagent_output_tokens += output_tokens;
+        }
     }
 
     pub fn lifetime_new_context(&self) -> u64 {
@@ -375,14 +385,16 @@ mod tests {
             hour(&session, "02", MODEL),
             HourUsage {
                 new_context: 40_000,
-                requests: 2
+                requests: 2,
+                ..HourUsage::default()
             }
         );
         assert_eq!(
             hour(&session, "03", MODEL),
             HourUsage {
                 new_context: 10_000,
-                requests: 1
+                requests: 1,
+                ..HourUsage::default()
             }
         );
         assert_eq!(
@@ -390,6 +402,81 @@ mod tests {
             Some("2026-10-30T02:00:00Z")
         );
         assert_eq!(hour_key("09:00"), None);
+    }
+
+    fn with_output(context: u64, output_tokens: u64) -> RequestUsage {
+        RequestUsage {
+            output_tokens,
+            ..cached(context)
+        }
+    }
+
+    #[test]
+    fn hours_record_output_tokens() {
+        let mut session = Session::new("s1".into());
+        session.record_request(MODEL.into(), with_output(20_000, 300), hour_at("02:10"));
+        session.record_request(MODEL.into(), with_output(25_000, 700), hour_at("02:40"));
+        session.record_request(SONNET.into(), with_output(26_000, 50), hour_at("02:50"));
+        session.record_request(MODEL.into(), with_output(30_000, 1_000), hour_at("03:05"));
+
+        assert_eq!(hour(&session, "02", MODEL).output_tokens, 1_000);
+        assert_eq!(hour(&session, "02", SONNET).output_tokens, 50);
+        assert_eq!(hour(&session, "03", MODEL).output_tokens, 1_000);
+        assert_eq!(hour(&session, "02", MODEL).subagent_output_tokens, 0);
+    }
+
+    #[test]
+    fn subagent_usage_does_not_change_context() {
+        let mut session = three_hour_session();
+        session.reset_baseline();
+        let before = session.clone();
+
+        session.record_subagent_request(SONNET, 400, &hour_at("02:30"));
+        session.record_subagent_request(SONNET, 600, &hour_at("02:45"));
+        session.record_subagent_request(MODEL, 900, &hour_at("04:01"));
+
+        assert_eq!(
+            hour(&session, "02", SONNET),
+            HourUsage {
+                subagent_requests: 2,
+                subagent_output_tokens: 1_000,
+                ..HourUsage::default()
+            }
+        );
+        assert_eq!(hour(&session, "04", MODEL).subagent_requests, 1);
+        assert_eq!(hour(&session, "02", MODEL), hour(&before, "02", MODEL));
+        assert_eq!(
+            session.lifetime_new_context(),
+            before.lifetime_new_context()
+        );
+        assert_eq!(
+            (
+                session.new_context,
+                session.latest_context,
+                session.peak_context
+            ),
+            (
+                before.new_context,
+                before.latest_context,
+                before.peak_context
+            )
+        );
+        assert_eq!(
+            (
+                session.requests,
+                session.compactions,
+                session.compactions_lifetime
+            ),
+            (
+                before.requests,
+                before.compactions,
+                before.compactions_lifetime
+            )
+        );
+        assert_eq!(
+            (&session.model, &session.latest_at, session.last_usage),
+            (&before.model, &before.latest_at, before.last_usage)
+        );
     }
 
     #[test]
@@ -415,7 +502,8 @@ mod tests {
             hour(&session, "03", SONNET),
             HourUsage {
                 new_context: 0,
-                requests: 1
+                requests: 1,
+                ..HourUsage::default()
             }
         );
 
@@ -426,7 +514,8 @@ mod tests {
             hour(&session, "03", SONNET),
             HourUsage {
                 new_context: 0,
-                requests: 2
+                requests: 2,
+                ..HourUsage::default()
             }
         );
         assert_eq!(session.compactions_lifetime, 1);

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod config;
 mod details;
 mod export;
@@ -14,6 +15,7 @@ mod tray;
 mod watcher;
 
 use eframe::egui;
+use std::fs::TryLockError;
 use std::io::Write;
 
 const WINDOW_SIZE: [f32; 2] = [1100.0, 650.0];
@@ -23,6 +25,11 @@ fn main() -> eframe::Result {
 
     if std::env::args().any(|arg| arg == "--dump") {
         print_snapshot();
+        return Ok(());
+    }
+
+    let instance = platform::lock_instance(&platform::instance_lock_file());
+    if matches!(instance, Err(TryLockError::WouldBlock)) {
         return Ok(());
     }
 

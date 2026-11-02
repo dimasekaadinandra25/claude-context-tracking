@@ -12,6 +12,8 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Per session: name, model, start / latest / new context, compactions
 - Claude colors, following your system's light or dark mode
 - System tray icon: closing the window hides it to the tray instead of quitting
+- Runs as a single instance: launching it again while it runs does nothing
+- Optional **Start with Windows** (in ⚙ Settings)
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
 - Optionally syncs usage to a team server every 30 minutes
 - Runs on Windows, macOS and Linux
@@ -24,7 +26,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 
 ### 1. Install the prerequisites
 
-**All platforms:** install Rust from [rustup.rs](https://rustup.rs) (stable toolchain, Rust 1.88 or newer).
+**All platforms:** install Rust from [rustup.rs](https://rustup.rs) (stable toolchain, Rust 1.89 or newer).
 
 | OS | Also needed |
 |---|---|
@@ -86,7 +88,7 @@ A session is **active** when its latest request was less than 10 minutes ago and
 | **New context** | Total context the session has added while the app was running. It only goes up: a compaction adds nothing, and growth after it adds on top. |
 | **Compacted** | How many times the session was compacted (manual `/compact` or auto-compact) since tracking started. Shown on active cards and in the context details |
 
-"Context" is the full prompt sent on a request: input + cache write + cache read tokens. Subagent requests are ignored, since they run in their own context window. Context windows are 1M tokens for Claude 4.6 and newer models, 200K for older ones.
+"Context" is the full prompt sent on a request: input + cache write + cache read tokens. Subagent requests are ignored here, since they run in their own context window; only the server sync counts them (see below). Context windows are 1M tokens for Claude 4.6 and newer models, 200K for older ones.
 
 **Example:** the app starts while a session is at 50K.
 
@@ -174,9 +176,9 @@ If the app ever crashes, details are appended to `crash.log` in the same folder.
 The app can send each session's usage to a `claude-usage-server` so a team dashboard shows everyone's usage over time.
 
 1. Ask your admin for an API key.
-2. Click the **⚙** button in the top bar, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
+2. Click the **⚙** button in the top bar to open **Settings**, paste the **API key** and click **Save**. The server URL is built in: `http://localhost:8080` by default, or the value of `CLAUDE_USAGE_SERVER_URL` at build time (`CLAUDE_USAGE_SERVER_URL=https://usage.example.com cargo build --release`). Setting `CLAUDE_USAGE_SERVER_URL` when the app runs, or `server_url` in `config.json`, overrides it.
 
-The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count. The top bar shows `Sync off`, `Synced 12:30 UTC` or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick.
+The app sends about a minute after startup, right after you change the settings, and then every **30 minutes**. The first send backfills every past session; later sends only carry sessions with new requests. Each send carries lifetime totals per session, bucketed by UTC hour and model, so resends and restarts never double count: context growth, requests and output tokens, plus the request count and output tokens of the session's subagents (read from `isSidechain` lines, including the `<session-id>/subagents/agent-*.jsonl` transcripts). The top bar shows `Sync off`, `Synced 12:30` (local time) or `Sync failed: <reason>` (hover for the full reason); a failed send is retried on the next 30-minute tick. When the server rejects some sessions (for example a session that belongs to another user) it reads `Synced 12:30 · 2 rejected`; hover for the reasons. A rejection does not hold the sync back: the next send moves on past it.
 
 Settings live in `config.json` and the sync position in `sync_state.json`:
 

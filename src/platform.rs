@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,6 +40,24 @@ pub fn data_file() -> PathBuf {
 
 pub fn crash_log() -> PathBuf {
     data_dir().join("crash.log")
+}
+
+pub fn instance_lock_file() -> PathBuf {
+    data_dir().join("instance.lock")
+}
+
+pub fn lock_instance(path: &Path) -> Result<File, TryLockError> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(TryLockError::Error)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(TryLockError::Error)?;
+    file.try_lock()?;
+    Ok(file)
 }
 
 fn data_dir() -> PathBuf {
@@ -92,5 +111,23 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_is_exclusive_until_dropped() {
+        let dir = TempDir::new("lock");
+        let path = dir.path().join("nested").join("instance.lock");
+        let first = lock_instance(&path).unwrap();
+        assert!(matches!(
+            lock_instance(&path),
+            Err(TryLockError::WouldBlock)
+        ));
+        drop(first);
+        assert!(lock_instance(&path).is_ok());
     }
 }

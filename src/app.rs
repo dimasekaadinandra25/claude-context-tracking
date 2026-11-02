@@ -1,3 +1,4 @@
+use crate::autostart;
 use crate::config;
 use crate::details;
 use crate::overhead::{self, Overhead};
@@ -43,7 +44,26 @@ pub struct App {
     overheads_refreshed: Option<Instant>,
     tray: Option<Tray>,
     sync: Option<SyncStatus>,
-    settings: Option<String>,
+    settings: Option<Settings>,
+}
+
+struct Settings {
+    api_key: String,
+    start_with_windows: bool,
+}
+
+impl Settings {
+    fn load() -> Self {
+        Self {
+            api_key: config::load().api_key,
+            start_with_windows: autostart::is_enabled(),
+        }
+    }
+
+    fn save(&self) -> bool {
+        config::save_api_key(&self.api_key).is_ok()
+            && autostart::set(self.start_with_windows).is_ok()
+    }
 }
 
 impl App {
@@ -94,7 +114,7 @@ impl App {
             ui.label(RichText::new(&self.machine).weak());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if settings_button(ui) {
-                    self.settings = Some(config::load().api_key);
+                    self.settings = Some(Settings::load());
                 }
                 if let Some(status) = &self.sync {
                     sync_label(ui, status);
@@ -202,12 +222,12 @@ impl App {
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
-        let Some(api_key) = &mut self.settings else {
+        let Some(settings) = &mut self.settings else {
             return;
         };
         let mut open = true;
         let mut save = false;
-        egui::Window::new("Sync settings")
+        egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -215,14 +235,17 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("API key");
                     ui.add(
-                        egui::TextEdit::singleline(api_key)
+                        egui::TextEdit::singleline(&mut settings.api_key)
                             .password(true)
                             .desired_width(SETTINGS_FIELD_WIDTH),
                     );
                 });
+                if autostart::SUPPORTED {
+                    ui.checkbox(&mut settings.start_with_windows, "Start with Windows");
+                }
                 save = ui.button("Save").clicked();
             });
-        if !open || (save && config::save_api_key(api_key).is_ok()) {
+        if !open || (save && settings.save()) {
             self.settings = None;
         }
     }
@@ -406,30 +429,54 @@ impl eframe::App for App {
 
 fn settings_button(ui: &mut Ui) -> bool {
     ui.add(egui::Button::new(RichText::new("⚙").size(ACTIVE_TEXT_SIZE)).frame(false))
-        .on_hover_text("Sync settings")
+        .on_hover_text("Settings")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
 }
 
 fn sync_label(ui: &mut Ui, status: &SyncStatus) {
+    let (text, hover) = sync_text(status, local_offset());
+    let label = ui.label(RichText::new(text).weak());
+    if let Some(hover) = hover {
+        label.on_hover_text(hover);
+    }
+}
+
+fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
     match status {
-        SyncStatus::Off => {
-            ui.label(RichText::new("Sync off").weak());
-        }
-        SyncStatus::Synced(at) => {
-            ui.label(RichText::new(format!("Synced {}", utc_clock(*at))).weak());
+        SyncStatus::Off => ("Sync off".to_owned(), None),
+        SyncStatus::Synced { at, rejected } => {
+            let text = format!("Synced {}", clock(*at, utc_offset));
+            if rejected.is_empty() {
+                return (text, None);
+            }
+            let reasons: Vec<String> = rejected
+                .iter()
+                .map(|r| format!("{}: {}", r.session_id, r.reason))
+                .collect();
+            (
+                format!("{text} · {} rejected", rejected.len()),
+                Some(reasons.join(
+                    "
+",
+                )),
+            )
         }
         SyncStatus::Failed(reason) => {
             let short: String = reason.chars().take(SYNC_REASON_CHARS).collect();
-            ui.label(RichText::new(format!("Sync failed: {short}")).weak())
-                .on_hover_text(reason);
+            (format!("Sync failed: {short}"), Some(reason.clone()))
         }
     }
 }
 
-fn utc_clock(at: SystemTime) -> String {
-    let seconds = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() % 86_400;
-    format!("{:02}:{:02} UTC", seconds / 3_600, seconds % 3_600 / 60)
+fn clock(at: SystemTime, utc_offset: i64) -> String {
+    let utc = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let seconds = (i64::try_from(utc).unwrap_or_default() + utc_offset).rem_euclid(86_400);
+    format!("{:02}:{:02}", seconds / 3_600, seconds % 3_600 / 60)
+}
+
+fn local_offset() -> i64 {
+    chrono::Local::now().offset().local_minus_utc().into()
 }
 
 fn split_row<R, L>(
@@ -483,4 +530,66 @@ fn matches_query(session: &Session, query: &str) -> bool {
         ]
         .iter()
         .any(|field| field.to_lowercase().contains(query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::Rejection;
+
+    const HOUR: i64 = 3_600;
+
+    fn at() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_793_324_739)
+    }
+
+    fn rejection(session_id: &str, reason: &str) -> Rejection {
+        Rejection {
+            session_id: session_id.into(),
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn clock_shows_local_time() {
+        assert_eq!(clock(at(), 0), "01:45");
+        assert_eq!(clock(at(), 7 * HOUR), "08:45");
+        assert_eq!(clock(at(), -5 * HOUR), "20:45");
+        assert_eq!(clock(at(), 5 * HOUR + 30 * 60), "07:15");
+    }
+
+    #[test]
+    fn sync_text_counts_rejected_sessions() {
+        let synced = |rejected| SyncStatus::Synced { at: at(), rejected };
+        assert_eq!(
+            sync_text(&synced(Vec::new()), 7 * HOUR),
+            ("Synced 08:45".to_owned(), None)
+        );
+        let rejected = vec![
+            rejection("s1", "session belongs to another user"),
+            rejection("s2", "numbers must be >= 0"),
+        ];
+        assert_eq!(
+            sync_text(&synced(rejected), 7 * HOUR),
+            (
+                "Synced 08:45 · 2 rejected".to_owned(),
+                Some(
+                    "s1: session belongs to another user
+s2: numbers must be >= 0"
+                        .to_owned()
+                )
+            )
+        );
+        assert_eq!(
+            sync_text(&SyncStatus::Off, 0),
+            ("Sync off".to_owned(), None)
+        );
+        assert_eq!(
+            sync_text(&SyncStatus::Failed("HTTP 500: boom".into()), 0),
+            (
+                "Sync failed: HTTP 500: boom".to_owned(),
+                Some("HTTP 500: boom".to_owned())
+            )
+        );
+    }
 }

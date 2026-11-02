@@ -137,6 +137,9 @@ CREATE TABLE usage.session_hours (
     user_id             UUID NOT NULL REFERENCES core.users(id) ON DELETE CASCADE,
     new_context         BIGINT NOT NULL DEFAULT 0,
     requests            INT NOT NULL DEFAULT 0,
+    output_tokens       BIGINT NOT NULL DEFAULT 0,
+    subagent_requests   INT NOT NULL DEFAULT 0,
+    subagent_output_tokens BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, hour, model)
 );
 
@@ -148,6 +151,7 @@ CREATE INDEX idx_usage_session_hours_model_hour ON usage.session_hours (model, h
 - `hour` is the request timestamp truncated to the hour, in UTC.
 - `user_id` is copied from the session so time-range queries need no join.
 - Ingest uses `INSERT ... ON CONFLICT (session_id, hour, model) DO UPDATE SET new_context = EXCLUDED.new_context, requests = EXCLUDED.requests`.
+- `output_tokens`, `subagent_requests` and `subagent_output_tokens` are the hour's output tokens, subagent (sidechain) requests and those subagents' output tokens, per model (migration `20261102015038_session_hours_output_subagent`). They are optional on ingest; a missing field is stored as 0, so older apps keep working.
 
 ### Example report query
 
@@ -191,14 +195,15 @@ Base path `/usage/v1`. Responses use the skeleton's `internal/shared/response` e
       "first_at": "2026-10-30T02:11:09.123Z",
       "latest_at": "2026-10-30T06:58:40.456Z",
       "hours": [
-        { "hour": "2026-10-30T02:00:00Z", "model": "claude-opus-5-5", "new_context": 40000, "requests": 120 },
-        { "hour": "2026-10-30T06:00:00Z", "model": "claude-sonnet-5-5", "new_context": 8000, "requests": 30 }
+        { "hour": "2026-10-30T02:00:00Z", "model": "claude-opus-5-5", "new_context": 40000, "requests": 120, "output_tokens": 15000, "subagent_requests": 4, "subagent_output_tokens": 6000 },
+        { "hour": "2026-10-30T06:00:00Z", "model": "claude-sonnet-5-5", "new_context": 8000, "requests": 30, "output_tokens": 2500, "subagent_requests": 0, "subagent_output_tokens": 0 }
       ]
     }
   ]
 }
 ```
 
+- `hours[].output_tokens`, `hours[].subagent_requests` and `hours[].subagent_output_tokens` are optional integers ≥ 0; missing means 0.
 - Each session's upserts into `usage.sessions` and `usage.session_hours` run in one transaction.
 - The response is `{ "accepted": n, "rejected": [{ "session_id": "...", "reason": "..." }] }`.
 - Limits: at most 200 sessions per payload and 2,000 hour rows per session. String fields are length-checked against the column sizes. Numbers must be ≥ 0.
@@ -211,11 +216,11 @@ If the caller is not an admin, the server forces `user_id` to the caller's own I
 
 | Endpoint | Returns | View |
 |----------|---------|------|
-| `GET /usage/v1/overview` | Per person: new context, sessions touched, requests, last request time, last synced, current model. Plus team totals. | Team overview |
-| `GET /usage/v1/timeseries?interval=hour\|day&group_by=user\|model&user_id=` | Buckets of `SUM(new_context)` and `SUM(requests)` | Overview chart, Person detail chart |
-| `GET /usage/v1/models?user_id=` | Per model: new context, requests and number of sessions | Model breakdown |
-| `GET /usage/v1/sessions?user_id=&project=&model=&q=&page=&per_page=&sort=` | Paged `usage.sessions` rows with the user's name | Session list |
-| `GET /usage/v1/sessions/:id` | The session plus its hourly rows | Session drill-down |
+| `GET /usage/v1/overview` | Per person: new context, sessions touched, requests, `output_tokens`, `subagent_requests`, `subagent_output_tokens`, last request time, last synced, current model. Plus team totals, including `total_output_tokens`, `total_subagent_requests`, `total_subagent_output_tokens`. | Team overview |
+| `GET /usage/v1/timeseries?interval=hour\|day&group_by=user\|model&user_id=` | Buckets of `SUM(new_context)`, `SUM(requests)`, `SUM(output_tokens)`, `SUM(subagent_requests)`, `SUM(subagent_output_tokens)` | Overview chart, Person detail chart |
+| `GET /usage/v1/models?user_id=` | Per model: new context, requests, number of sessions, `output_tokens`, `subagent_requests`, `subagent_output_tokens` | Model breakdown |
+| `GET /usage/v1/sessions?user_id=&project=&model=&q=&page=&per_page=&sort=` | Paged `usage.sessions` rows with the user's name, plus in-range sums `output_tokens`, `subagent_requests`, `subagent_output_tokens` (same range rule as `new_context`). A session is listed when `new_context`, `output_tokens` or `subagent_requests` is > 0 in the range | Session list |
+| `GET /usage/v1/sessions/:id` | The session plus its hourly rows, each with `output_tokens`, `subagent_requests`, `subagent_output_tokens` | Session drill-down |
 | `GET /usage/v1/people` | List of users (admins only) | Person picker |
 
 ### Admin (JWT, admin)
