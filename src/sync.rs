@@ -1,8 +1,10 @@
 use crate::config::{self, Config, SyncIdentity};
 use crate::index::Index;
-use crate::platform::APP_VERSION;
+use crate::overhead::{self, Overhead};
+use crate::platform::{self, APP_VERSION};
 use crate::session::{Session, unix_seconds};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -37,6 +39,16 @@ struct SessionPayload<'a> {
     first_at: &'a str,
     latest_at: &'a str,
     hours: Vec<HourPayload<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overhead: Option<OverheadPayload>,
+}
+
+#[derive(Serialize)]
+struct OverheadPayload {
+    system_tokens: u64,
+    memory_tokens: u64,
+    agents_tokens: u64,
+    skills_tokens: u64,
 }
 
 #[derive(Serialize)]
@@ -54,20 +66,25 @@ struct HourPayload<'a> {
 }
 
 impl<'a> Payload<'a> {
-    fn new(machine: &'a str, sessions: &[&'a Session], hide_titles: bool) -> Self {
+    fn new(
+        machine: &'a str,
+        sessions: &[&'a Session],
+        hide_titles: bool,
+        overheads: &HashMap<String, Overhead>,
+    ) -> Self {
         Self {
             machine,
             app_version: APP_VERSION,
             sessions: sessions
                 .iter()
-                .map(|s| SessionPayload::new(s, hide_titles))
+                .map(|s| SessionPayload::new(s, hide_titles, overheads.get(&s.project)))
                 .collect(),
         }
     }
 }
 
 impl<'a> SessionPayload<'a> {
-    fn new(s: &'a Session, hide_titles: bool) -> Self {
+    fn new(s: &'a Session, hide_titles: bool, overhead: Option<&Overhead>) -> Self {
         Self {
             session_id: &s.id,
             project: if hide_titles {
@@ -102,6 +119,14 @@ impl<'a> SessionPayload<'a> {
                     cache_read_tokens: usage.cache_read_tokens,
                 })
                 .collect(),
+            overhead: overhead
+                .filter(|_| s.has_requests())
+                .map(|o| OverheadPayload {
+                    system_tokens: o.system_tokens(s),
+                    memory_tokens: o.memory_tokens(),
+                    agents_tokens: o.agent_tokens(),
+                    skills_tokens: o.skills,
+                }),
         }
     }
 }
@@ -132,6 +157,7 @@ pub enum SyncStatus {
         at: SystemTime,
         rejected: Vec<Rejection>,
     },
+    KeyRejected,
     Failed(String),
 }
 
@@ -185,7 +211,7 @@ impl Syncer {
         report(SyncStatus::Syncing);
         let (sessions, machine) = (index.snapshot(), machine.to_owned());
         self.running = Some(std::thread::spawn(move || {
-            report(run_with(post, &config, &sessions, &machine));
+            report(run_with(post, estimate, &config, &sessions, &machine));
         }));
     }
 
@@ -193,7 +219,7 @@ impl Syncer {
         if let Some(run) = self.running.take() {
             let _ = run.join();
         }
-        run_with(post, &config::load(), &index.snapshot(), machine);
+        run_with(post, estimate, &config::load(), &index.snapshot(), machine);
     }
 }
 
@@ -241,8 +267,13 @@ fn after_overlap(active_at: &str, watermark: &str) -> bool {
     }
 }
 
+fn estimate(project: &str) -> Overhead {
+    overhead::estimate(&platform::claude_dir(), project)
+}
+
 fn run_with(
-    mut post: impl FnMut(&str, &str, &str) -> Result<String, String>,
+    mut post: impl FnMut(&str, &str, &str) -> Result<String, SyncStatus>,
+    mut estimate: impl FnMut(&str) -> Overhead,
     config: &Config,
     sessions: &[Session],
     machine: &str,
@@ -255,14 +286,21 @@ fn run_with(
         config.server_url.trim().trim_end_matches('/')
     );
     let mut rejected = Vec::new();
+    let mut overheads = HashMap::new();
     for chunk in chunks(sessions, config::load_watermark(config).as_deref()) {
-        let body = match serde_json::to_string(&Payload::new(machine, &chunk, config.hide_titles)) {
+        for session in &chunk {
+            overheads
+                .entry(session.project.clone())
+                .or_insert_with(|| estimate(&session.project));
+        }
+        let payload = Payload::new(machine, &chunk, config.hide_titles, &overheads);
+        let body = match serde_json::to_string(&payload) {
             Ok(body) => body,
             Err(error) => return SyncStatus::Failed(error.to_string()),
         };
         match post(&url, config.api_key.trim(), &body) {
             Ok(response) => rejected.extend(rejections(&response)),
-            Err(reason) => return SyncStatus::Failed(reason),
+            Err(status) => return status,
         }
         let newest = chunk.last().map_or("", |s| s.last_activity());
         if let Err(error) = config::save_watermark(config, newest) {
@@ -281,7 +319,7 @@ fn rejections(body: &str) -> Vec<Rejection> {
         .unwrap_or_default()
 }
 
-fn post(url: &str, key: &str, body: &str) -> Result<String, String> {
+fn post(url: &str, key: &str, body: &str) -> Result<String, SyncStatus> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
@@ -291,16 +329,21 @@ fn post(url: &str, key: &str, body: &str) -> Result<String, String> {
     for (name, value) in headers(key) {
         request = request.header(name, value);
     }
-    let mut response = request.send(body).map_err(|error| error.to_string())?;
+    let mut response = request
+        .send(body)
+        .map_err(|error| SyncStatus::Failed(error.to_string()))?;
     let text = response.body_mut().read_to_string().unwrap_or_default();
     if response.status().is_success() {
         return Ok(text);
     }
-    Err(format!(
-        "HTTP {}: {}",
-        response.status().as_u16(),
-        error_message(&text)
-    ))
+    Err(failure(response.status().as_u16(), &text))
+}
+
+fn failure(status: u16, body: &str) -> SyncStatus {
+    match status {
+        401 | 403 => SyncStatus::KeyRejected,
+        _ => SyncStatus::Failed(format!("HTTP {status}: {}", error_message(body))),
+    }
 }
 
 fn headers(key: &str) -> [(&'static str, &str); 3] {
@@ -321,6 +364,7 @@ fn error_message(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overhead::Item;
     use crate::platform::{TempDir, lock_env};
     use crate::session::{HourUsage, RequestUsage, cached};
     use serde_json::Value;
@@ -346,6 +390,29 @@ mod tests {
 
     fn sizes(chunks: &[Vec<&Session>]) -> Vec<usize> {
         chunks.iter().map(Vec::len).collect()
+    }
+
+    fn item(tokens: u64) -> Item {
+        Item {
+            name: "file.md".into(),
+            tokens,
+        }
+    }
+
+    fn overhead() -> Overhead {
+        Overhead {
+            memory_files: vec![item(1_000), item(200)],
+            agents: vec![item(500)],
+            skills: 300,
+        }
+    }
+
+    fn with_request(mut session: Session, project: &str) -> Session {
+        session.project = project.into();
+        session.requests = 1;
+        session.base_context = 20_000;
+        session.latest_context = 25_000;
+        session
     }
 
     fn enabled() -> Config {
@@ -379,7 +446,8 @@ mod tests {
             "2026-10-30T03:20:00Z",
         );
 
-        let json = serde_json::to_value(SessionPayload::new(&session, false)).unwrap();
+        let json =
+            serde_json::to_value(SessionPayload::new(&session, false, Some(&overhead()))).unwrap();
         let mut keys: Vec<&str> = json
             .as_object()
             .unwrap()
@@ -398,6 +466,7 @@ mod tests {
                 "latest_context",
                 "model",
                 "new_context",
+                "overhead",
                 "peak_context",
                 "project",
                 "requests",
@@ -426,6 +495,15 @@ mod tests {
         assert_eq!(json["hours"][1]["input_tokens"], 4);
         assert_eq!(json["hours"][1]["cache_write_tokens"], 6_000);
         assert_eq!(json["hours"][1]["cache_read_tokens"], 30_000);
+        assert_eq!(
+            json["overhead"],
+            serde_json::json!({
+                "system_tokens": 18_000,
+                "memory_tokens": 1_200,
+                "agents_tokens": 500,
+                "skills_tokens": 300,
+            })
+        );
         let mut hour_keys: Vec<&str> = json["hours"][0]
             .as_object()
             .unwrap()
@@ -449,7 +527,7 @@ mod tests {
             ]
         );
 
-        let payload = Payload::new("PC", &[&session], false);
+        let payload = Payload::new("PC", &[&session], false, &HashMap::new());
         let json: Value = serde_json::to_value(payload).unwrap();
         assert_eq!(json["machine"], "PC");
         assert_eq!(json["app_version"], env!("CARGO_PKG_VERSION"));
@@ -458,14 +536,70 @@ mod tests {
 
     #[test]
     fn hidden_titles_send_no_title_or_project() {
-        let mut session = session_with_hours(0, 1, 1);
+        let mut session = with_request(session_with_hours(0, 1, 1), r"C:\Code\client-x");
         session.title = "Client X pricing".into();
-        session.project = r"C:\Code\client-x".into();
-        let json: Value = serde_json::to_value(Payload::new("PC", &[&session], true)).unwrap();
+        let overheads = HashMap::from([(session.project.clone(), overhead())]);
+        let json: Value =
+            serde_json::to_value(Payload::new("PC", &[&session], true, &overheads)).unwrap();
         let sent = &json["sessions"][0];
         assert_eq!(sent["title"], "");
         assert_eq!(sent["project"], "");
         assert_eq!(sent["model"], session.model.as_str());
+        assert_eq!(sent["overhead"]["system_tokens"], 18_000);
+        assert_eq!(sent["overhead"]["memory_tokens"], 1_200);
+    }
+
+    #[test]
+    fn overhead_is_estimated_once_per_project_and_omitted_without_requests() {
+        let _env = lock_env();
+        let dir = TempDir::new("sync-overhead");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        let mut sessions: Vec<Session> = (0..250)
+            .map(|i| with_request(session_with_hours(i, 1, 1), ["a", "b"][i % 2]))
+            .collect();
+        sessions[0].requests = 0;
+        let mut estimated = Vec::new();
+        let mut bodies = Vec::new();
+        let status = run_with(
+            |_, _, body| {
+                bodies.push(serde_json::from_str::<Value>(body).unwrap());
+                Ok(String::new())
+            },
+            |project| {
+                estimated.push(project.to_owned());
+                overhead()
+            },
+            &enabled(),
+            &sessions,
+            "PC",
+        );
+        assert!(matches!(status, SyncStatus::Synced { .. }));
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(estimated, ["a", "b"]);
+        let sent: Vec<&Value> = bodies
+            .iter()
+            .flat_map(|body| body["sessions"].as_array().unwrap())
+            .collect();
+        assert_eq!(sent[0]["session_id"], "s0");
+        assert!(sent[0].get("overhead").is_none());
+        assert!(
+            sent[1..]
+                .iter()
+                .all(|s| s["overhead"]["system_tokens"] == 18_000)
+        );
+    }
+
+    #[test]
+    fn unauthorized_responses_mean_the_key_was_rejected() {
+        assert_eq!(failure(401, ""), SyncStatus::KeyRejected);
+        assert_eq!(
+            failure(403, r#"{"message":"forbidden"}"#),
+            SyncStatus::KeyRejected
+        );
+        assert_eq!(
+            failure(500, r#"{"message":"Internal server error"}"#),
+            SyncStatus::Failed("HTTP 500: Internal server error".into())
+        );
     }
 
     #[test]
@@ -589,10 +723,11 @@ mod tests {
                 assert_eq!(key, "key");
                 assert!(body.starts_with(r#"{"machine":"PC""#));
                 if calls == 2 {
-                    return Err("HTTP 500: Internal server error".into());
+                    return Err(failure(500, "Internal server error"));
                 }
                 Ok(String::new())
             },
+            |_| Overhead::default(),
             &enabled(),
             &sessions,
             "PC",
@@ -609,6 +744,7 @@ mod tests {
 
         let status = run_with(
             |_, _, _| Ok(REJECTED_RESPONSE.to_owned()),
+            |_| Overhead::default(),
             &enabled(),
             &sessions,
             "PC",
@@ -653,6 +789,7 @@ mod tests {
                 calls += 1;
                 Ok(String::new())
             },
+            |_| Overhead::default(),
             &config,
             &sessions,
             "PC",

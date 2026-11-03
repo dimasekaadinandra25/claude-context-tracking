@@ -1,7 +1,7 @@
 use crate::autostart;
 use crate::config;
 use crate::platform::APP_VERSION;
-use crate::theme::RED;
+use crate::theme::{self, RED};
 use eframe::egui::{self, RichText};
 use std::io;
 
@@ -42,41 +42,37 @@ impl Settings {
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut open = true;
         let mut save = false;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("API key");
-                    ui.add_enabled(
-                        !self.key_from_env,
-                        egui::TextEdit::singleline(&mut self.api_key)
-                            .password(true)
-                            .desired_width(FIELD_WIDTH),
-                    );
-                });
-                if self.key_from_env {
-                    ui.label(RichText::new("Set by environment variable").small().weak());
-                }
-                if autostart::SUPPORTED {
-                    ui.checkbox(&mut self.start_with_windows, "Start with Windows");
-                }
-                ui.checkbox(
-                    &mut self.hide_titles,
-                    "Hide session titles and project names",
-                )
-                .on_hover_text(PRIVACY_HINT);
-                save = ui.button("Save").clicked();
-                if let Some(error) = &self.error {
-                    ui.colored_label(RED, format!("Couldn't save: {error}"));
-                }
-                ui.label(
-                    RichText::new(format!("Version {APP_VERSION}"))
-                        .small()
-                        .weak(),
+        theme::dialog(ctx, "Settings", &mut open, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("API key");
+                ui.add_enabled(
+                    !self.key_from_env,
+                    egui::TextEdit::singleline(&mut self.api_key)
+                        .password(true)
+                        .desired_width(FIELD_WIDTH),
                 );
             });
+            if self.key_from_env {
+                ui.label(RichText::new("Set by environment variable").small().weak());
+            }
+            if autostart::SUPPORTED {
+                ui.checkbox(&mut self.start_with_windows, "Start with Windows");
+            }
+            ui.checkbox(
+                &mut self.hide_titles,
+                "Hide session titles and project names",
+            )
+            .on_hover_text(PRIVACY_HINT);
+            save = ui.button("Save").clicked();
+            if let Some(error) = &self.error {
+                ui.colored_label(RED, format!("Couldn't save: {error}"));
+            }
+            ui.label(
+                RichText::new(format!("Version {APP_VERSION}"))
+                    .small()
+                    .weak(),
+            );
+        });
         if save {
             match self.save() {
                 Ok(()) => return true,

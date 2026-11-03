@@ -90,7 +90,7 @@ fn categories(ui: &Ui, session: &Session, overhead: &Overhead) -> [Category; 6] 
     [
         Category {
             name: "System prompt & tools",
-            tokens: session.system_context().saturating_sub(overhead.total()),
+            tokens: overhead.system_tokens(session),
             color: SYSTEM_COLOR,
             estimated: true,
             hint: "First request of the session minus the estimated parts below: system prompt, built-in and MCP tools, MCP instructions and the first message",

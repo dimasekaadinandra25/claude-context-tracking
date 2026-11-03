@@ -12,7 +12,7 @@ const LINE_HEIGHT: f32 = 22.0;
 const LINE_GAP: f32 = 6.0;
 const CARD_MARGIN: i8 = 10;
 const DOT_RADIUS: f32 = 3.0;
-const NAME_WIDTH: f32 = 110.0;
+const NAME_SHARE: f32 = 0.45;
 const BAR_HEIGHT: f32 = 7.0;
 const PERCENT_WIDTH: f32 = 34.0;
 
@@ -50,12 +50,17 @@ pub fn show(ui: &mut Ui, sessions: &[Session], today: u64) -> bool {
             let height = lines * LINE_HEIGHT + (lines - 1.0) * LINE_GAP;
             ui.add_space(((ui.available_height() - height) / 2.0).max(0.0));
             if active.is_empty() {
-                line(ui, |ui| ui.label(RichText::new("No active session").weak()));
                 line(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("+{} new context today", format_tokens(today)))
-                            .strong()
-                            .color(ACCENT),
+                    ui.add(Label::new(RichText::new("No active session").weak()).truncate())
+                });
+                line(ui, |ui| {
+                    ui.add(
+                        Label::new(
+                            RichText::new(format!("+{} new context today", format_tokens(today)))
+                                .strong()
+                                .color(ACCENT),
+                        )
+                        .truncate(),
                     )
                 });
             }
@@ -79,22 +84,28 @@ fn line<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) {
 }
 
 fn session_line(ui: &mut Ui, session: &Session) {
+    let (name, bar) = split_line(ui.available_width(), ui.spacing().item_spacing.x);
     theme::dot(ui, DOT_RADIUS, LIVE);
     ui.allocate_ui_with_layout(
-        vec2(NAME_WIDTH, LINE_HEIGHT),
+        vec2(name, LINE_HEIGHT),
         Layout::left_to_right(Align::Center),
         |ui| {
-            ui.set_min_width(NAME_WIDTH);
+            ui.set_min_width(name);
             ui.add(Label::new(RichText::new(session.name()).strong()).truncate());
         },
     );
     let fraction = session.usage_fraction();
-    let width = ui.available_width() - PERCENT_WIDTH - ui.spacing().item_spacing.x;
-    theme::gradient_bar(ui, fraction, vec2(width, BAR_HEIGHT));
+    theme::gradient_bar(ui, fraction, vec2(bar, BAR_HEIGHT));
     ui.add_sized(
         [PERCENT_WIDTH, LINE_HEIGHT],
         Label::new(RichText::new(percent(fraction)).small()),
     );
+}
+
+fn split_line(width: f32, gap: f32) -> (f32, f32) {
+    let rest = (width - DOT_RADIUS * 2.0 - PERCENT_WIDTH - 3.0 * gap).max(0.0);
+    let name = rest * NAME_SHARE;
+    (name, rest - name)
 }
 
 fn active(sessions: &[Session], now: SystemTime) -> Vec<&Session> {
@@ -139,6 +150,16 @@ mod tests {
             .collect();
         assert_eq!(ids, ["a", "b"]);
         assert!(active(&sessions[..1], now).is_empty());
+    }
+
+    #[test]
+    fn line_splits_width_and_never_goes_negative() {
+        let (name, bar) = split_line(302.0, 8.0);
+        assert!((name - 107.1).abs() < 0.01);
+        assert!((bar - 130.9).abs() < 0.01);
+        assert_eq!(split_line(60.0, 8.0), (0.0, 0.0));
+        let (wide_name, wide_bar) = split_line(800.0, 8.0);
+        assert!(wide_name > name && wide_bar > bar);
     }
 
     #[test]

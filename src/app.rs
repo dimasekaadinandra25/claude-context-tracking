@@ -7,7 +7,7 @@ use crate::platform::{self, APP_NAME};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
 use crate::sync::SyncStatus;
-use crate::theme::{self, ACCENT, FULL_AT, LIVE};
+use crate::theme::{self, ACCENT, FULL_AT, LIVE, RED};
 use crate::tray::{self, Tray};
 use crate::watcher::{self, Command, Update};
 use eframe::egui::collapsing_header::{CollapsingState, paint_default_icon};
@@ -30,6 +30,9 @@ const INFO_RADIUS: f32 = 6.0;
 const IDLE_VALUE_WIDTH: f32 = 52.0;
 const IDLE_CONTEXT_WIDTH: f32 = 80.0;
 const IDLE_MODEL_WIDTH: f32 = 88.0;
+const IDLE_NAME_MIN_WIDTH: f32 = 140.0;
+const MAX_CONTENT_WIDTH: f32 = 760.0;
+const SUMMARY_SEPARATOR: &str = "  ·  ";
 const IDLE_INSET: i8 = 14;
 const IDLE_PANEL_MARGIN: i8 = 6;
 const SECTION_SPACING: f32 = 4.0;
@@ -38,6 +41,7 @@ const CARD_SPACING: f32 = 8.0;
 const SEARCH_WIDTH: f32 = 100.0;
 const TOP_ROW_HEIGHT: f32 = 28.0;
 const BANNER_ROW_HEIGHT: f32 = 24.0;
+const FOLD_ICON_WIDTH: f32 = 10.0;
 const LIVE_PILL_WIDTH: f32 = 64.0;
 const PILL_PADDING: f32 = 28.0;
 const SEARCH_ICON_SIZE: f32 = 13.0;
@@ -79,9 +83,12 @@ enum IdleSort {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, hidden: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let config = config::load();
+        if !config.is_enabled() && config::claim_key_reminder() {
+            alerts::notify_key_reminder();
+        }
         cc.egui_ctx.set_theme(if config.light_mode {
             egui::Theme::Light
         } else {
@@ -89,9 +96,13 @@ impl App {
         });
         let (tx, updates) = channel();
         let commands = watcher::spawn(cc.egui_ctx.clone(), tx.clone());
+        let tray = tray::spawn(cc.egui_ctx.clone(), tx, commands.clone());
+        if hidden && tray.is_some() {
+            tray::set_window_visible(&cc.egui_ctx, false);
+        }
         Self {
             updates,
-            commands: commands.clone(),
+            commands,
             mini: None,
             indexing: Some((0, 0)),
             machine: platform::machine_name(),
@@ -100,7 +111,7 @@ impl App {
             details_for: None,
             overheads: HashMap::new(),
             overheads_refreshed: None,
-            tray: tray::spawn(cc.egui_ctx.clone(), tx, commands),
+            tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
             } else {
@@ -200,7 +211,7 @@ impl App {
             ui,
             TOP_ROW_HEIGHT,
             |ui| {
-                let settings = glyph_button(ui, "⚙", "Settings");
+                let settings = icon_button(ui, theme::Icon::Gear, "Settings");
                 mode_button(ui);
                 let mini = icon_button(
                     ui,
@@ -228,7 +239,9 @@ impl App {
                 ProgressBar::new(fraction).text(format!("Indexing sessions… {done}/{total} files")),
             );
         }
-        if needs_api_key(&self.sync) && api_key_banner(ui) {
+        if let Some(problem) = key_problem(&self.sync)
+            && api_key_banner(ui, problem)
+        {
             self.settings = Some(Settings::load());
         }
         ui.add_space(6.0);
@@ -276,29 +289,48 @@ impl App {
         let (count, active) = self.visible_sessions().fold((0, 0), |(count, active), s| {
             (count + 1, active + usize::from(s.is_active(now)))
         });
-        let total = total_new_context(self.visible_sessions());
+        let total = RichText::new(format!(
+            "+{}",
+            format_tokens(total_new_context(self.visible_sessions()))
+        ))
+        .strong()
+        .color(ACCENT);
+        let label = RichText::new("New context since launch").weak();
+        let counts = RichText::new(format!("{active} active  ·  {count} sessions")).weak();
+        let sync_now = !matches!(self.sync, SyncStatus::Off | SyncStatus::Syncing);
+        let gap = ui.spacing().item_spacing.x;
+        let base = text_width(ui, total.clone()) + if sync_now { ICON_SIZE + gap } else { 0.0 };
+        let sync = RichText::new(sync_text(&self.sync, local_offset()).0).small();
+        let shown = fitting(
+            &[
+                text_width(ui, sync) + PILL_PADDING,
+                text_width(ui, label.clone()),
+                text_width(ui, counts.clone()),
+            ],
+            gap,
+            ui.available_width() - base,
+        );
         ui.add_space(4.0);
         split_row(
             ui,
             ROW_HEIGHT,
             |ui| {
-                ui.label(RichText::new(format!("{active} active  ·  {count} sessions")).weak());
-                sync_label(ui, &self.sync);
-                if !matches!(self.sync, SyncStatus::Off | SyncStatus::Syncing)
-                    && icon_button(ui, theme::Icon::Refresh, "Sync now")
-                {
+                if shown > 2 {
+                    ui.label(counts);
+                }
+                if shown > 0 && sync_label(ui, &self.sync) {
+                    self.settings = Some(Settings::load());
+                }
+                if sync_now && icon_button(ui, theme::Icon::Refresh, "Sync now") {
                     self.sync = SyncStatus::Syncing;
                     let _ = self.commands.send(Command::SyncNow);
                 }
             },
             |ui| {
-                ui.label(RichText::new("New context since launch").weak())
-                    .on_hover_text(TOTAL_HINT);
-                ui.label(
-                    RichText::new(format!("+{}", format_tokens(total)))
-                        .strong()
-                        .color(ACCENT),
-                );
+                if shown > 1 {
+                    ui.label(label).on_hover_text(TOTAL_HINT);
+                }
+                ui.label(total).on_hover_text(TOTAL_HINT);
             },
         );
         ui.add_space(4.0);
@@ -313,11 +345,9 @@ impl App {
             return;
         };
         let mut open = true;
-        egui::Window::new("Context usage")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| details::show(ui, session, self.overhead(session)));
+        theme::dialog(ctx, "Context usage", &mut open, |ui| {
+            details::show(ui, session, self.overhead(session))
+        });
         if !open {
             self.details_for = None;
         }
@@ -381,6 +411,7 @@ impl App {
                     );
                     idle_frame().show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().indent = FOLD_ICON_WIDTH;
                             fold.show_toggle_button(ui, paint_default_icon);
                             let label = ui
                                 .add(
@@ -444,14 +475,6 @@ impl App {
                                 .color(ACCENT),
                         )
                         .on_hover_text(NEW_CONTEXT_HINT);
-                    },
-                    |ui| {
-                        theme::dot(ui, ACTIVE_DOT_RADIUS, LIVE);
-                        name_label(
-                            ui,
-                            session,
-                            RichText::new(session.name()).size(NAME_TEXT_SIZE).strong(),
-                        );
                         if let Some(color) = level {
                             let hint = if fraction >= FULL_AT {
                                 "auto-compact near"
@@ -465,16 +488,27 @@ impl App {
                             );
                         }
                     },
+                    |ui| {
+                        theme::dot(ui, ACTIVE_DOT_RADIUS, LIVE);
+                        name_label(
+                            ui,
+                            session,
+                            RichText::new(session.name()).size(NAME_TEXT_SIZE).strong(),
+                        );
+                    },
                 );
                 let bar =
                     self.context_bar(ui, session, vec2(ui.available_width(), ACTIVE_BAR_HEIGHT));
+                let latest = RichText::new(session.latest_label()).small().weak();
+                let reserve =
+                    ROW_HEIGHT + text_width(ui, latest.clone()) + 2.0 * ui.spacing().item_spacing.x;
                 let (_, info) = split_row(
                     ui,
                     ROW_HEIGHT,
-                    |ui| ui.label(RichText::new(summary(session)).small().weak()),
+                    |ui| summary_label(ui, session, reserve),
                     |ui| {
                         let info = self.info_button(ui, session);
-                        ui.label(RichText::new(session.latest_label()).small().weak());
+                        ui.label(latest);
                         info
                     },
                 );
@@ -486,6 +520,7 @@ impl App {
     fn idle_row(&self, ui: &mut Ui, session: &Session, now: SystemTime) -> bool {
         idle_frame()
             .show(ui, |ui| {
+                let columns = idle_columns(ui.available_width(), ui.spacing().item_spacing.x);
                 split_row(
                     ui,
                     ROW_HEIGHT,
@@ -498,16 +533,20 @@ impl App {
                         fixed_width_label(ui, IDLE_VALUE_WIDTH, RichText::new(age).small().weak());
                         fixed_width_label(ui, IDLE_VALUE_WIDTH, idle_new_context(session))
                             .on_hover_text(NEW_CONTEXT_HINT);
-                        fixed_width_label(
-                            ui,
-                            IDLE_CONTEXT_WIDTH,
-                            RichText::new(session.latest_short_label()).small(),
-                        );
-                        fixed_width_label(
-                            ui,
-                            IDLE_MODEL_WIDTH,
-                            RichText::new(&session.model).small().weak(),
-                        );
+                        if columns > 0 {
+                            fixed_width_label(
+                                ui,
+                                IDLE_CONTEXT_WIDTH,
+                                RichText::new(session.latest_short_label()).small(),
+                            );
+                        }
+                        if columns > 1 {
+                            fixed_width_label(
+                                ui,
+                                IDLE_MODEL_WIDTH,
+                                RichText::new(&session.model).small().weak(),
+                            );
+                        }
                         info
                     },
                     |ui| name_label(ui, session, RichText::new(session.name())),
@@ -523,8 +562,10 @@ impl App {
     }
 
     fn info_button(&self, ui: &mut Ui, session: &Session) -> bool {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ROW_HEIGHT, ROW_HEIGHT), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(INFO_RADIUS * 2.0 + 2.0, ROW_HEIGHT),
+            egui::Sense::click(),
+        );
         let color = if response.hovered() {
             ACCENT
         } else {
@@ -574,11 +615,13 @@ impl eframe::App for App {
             return;
         }
         self.handle_keys(ui.ctx());
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-        egui::Panel::bottom("totals").show(ui, |ui| self.totals_bar(ui));
+        egui::Panel::top("top").show(ui, |ui| centered(ui, |ui| self.top_bar(ui)));
+        egui::Panel::bottom("totals").show(ui, |ui| centered(ui, |ui| self.totals_bar(ui)));
         let mut sort = self.idle_sort;
         let opened = egui::CentralPanel::default()
-            .show(ui, |ui| self.sessions_list(ui, &mut sort))
+            .show(ui, |ui| {
+                centered(ui, |ui| self.sessions_list(ui, &mut sort))
+            })
             .inner;
         self.idle_sort = sort;
         if opened.is_some() {
@@ -604,16 +647,11 @@ fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
 fn mode_button(ui: &mut Ui) {
     let dark = ui.visuals().dark_mode;
     let (icon, hint) = if dark {
-        ("☀", "Switch to light mode")
+        (theme::Icon::Sun, "Switch to light mode")
     } else {
-        ("🌙", "Switch to dark mode")
+        (theme::Icon::Moon, "Switch to dark mode")
     };
-    let clicked = ui
-        .add(egui::Button::new(RichText::new(icon).size(ICON_SIZE)).frame(false))
-        .on_hover_text(hint)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked();
-    if clicked {
+    if icon_button(ui, icon, hint) {
         ui.ctx().set_theme(if dark {
             egui::Theme::Light
         } else {
@@ -631,14 +669,28 @@ fn idle_new_context(session: &Session) -> RichText {
     }
 }
 
-fn needs_api_key(status: &SyncStatus) -> bool {
-    matches!(status, SyncStatus::Off)
+type KeyProblem = (egui::Color32, &'static str, &'static str);
+
+fn key_problem(status: &SyncStatus) -> Option<KeyProblem> {
+    match status {
+        SyncStatus::Off => Some((
+            theme::AMBER,
+            "Your usage isn't sent to the team dashboard yet",
+            "Add API key",
+        )),
+        SyncStatus::KeyRejected => Some((
+            RED,
+            "API key rejected. Check it in Settings.",
+            "Open Settings",
+        )),
+        _ => None,
+    }
 }
 
-fn api_key_banner(ui: &mut Ui) -> bool {
+fn api_key_banner(ui: &mut Ui, (color, message, button): KeyProblem) -> bool {
     ui.add_space(4.0);
     theme::glass(ui)
-        .stroke((1.0, theme::AMBER.gamma_multiply(0.8)))
+        .stroke((1.0, color.gamma_multiply(0.8)))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             split_row(
@@ -646,18 +698,17 @@ fn api_key_banner(ui: &mut Ui) -> bool {
                 BANNER_ROW_HEIGHT,
                 |ui| {
                     ui.add(
-                        egui::Button::new(RichText::new("Add API key").color(egui::Color32::WHITE))
+                        egui::Button::new(RichText::new(button).color(egui::Color32::WHITE))
                             .fill(ACCENT),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 },
                 |ui| {
-                    theme::dot(ui, LIVE_DOT_RADIUS, theme::AMBER);
+                    theme::dot(ui, LIVE_DOT_RADIUS, color);
                     ui.add(
                         egui::Label::new(
-                            RichText::new("Your usage isn't sent to the team dashboard yet")
-                                .color(ui.visuals().strong_text_color()),
+                            RichText::new(message).color(ui.visuals().strong_text_color()),
                         )
                         .truncate(),
                     );
@@ -688,20 +739,20 @@ fn search_box(ui: &mut Ui, filter: &mut String) {
 
 fn title_area(ui: &mut Ui, machine: &str, live: bool) {
     theme::logo(ui, LOGO_SIZE);
-    ui.heading(RichText::new(APP_NAME).strong())
-        .on_hover_text(machine);
-    let live_width = if live { LIVE_PILL_WIDTH } else { 0.0 };
-    let machine_width = ui
-        .painter()
-        .layout_no_wrap(
-            machine.to_owned(),
-            egui::TextStyle::Small.resolve(ui.style()),
-            ui.visuals().text_color(),
-        )
-        .size()
-        .x
-        + PILL_PADDING;
-    if ui.available_width() >= machine_width + live_width {
+    let title = RichText::new(APP_NAME).heading().strong();
+    let gap = ui.spacing().item_spacing.x;
+    let machine_width = text_width(ui, RichText::new(machine).small()) + PILL_PADDING;
+    let (show_title, show_machine) = title_parts(
+        ui.available_width(),
+        gap,
+        text_width(ui, title.clone()),
+        machine_width,
+        live,
+    );
+    if show_title {
+        ui.label(title).on_hover_text(machine);
+    }
+    if show_machine {
         theme::pill(ui).show(ui, |ui| ui.label(RichText::new(machine).small()));
     }
     if live && ui.available_width() >= LIVE_PILL_WIDTH {
@@ -716,13 +767,6 @@ fn title_area(ui: &mut Ui, machine: &str, live: bool) {
     }
 }
 
-fn glyph_button(ui: &mut Ui, glyph: &str, hint: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new(glyph).size(ICON_SIZE)).frame(false))
-        .on_hover_text(hint)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-}
-
 fn icon_button(ui: &mut Ui, icon: theme::Icon, hint: &str) -> bool {
     theme::icon_button(ui, icon, ICON_SIZE)
         .on_hover_text(hint)
@@ -730,14 +774,24 @@ fn icon_button(ui: &mut Ui, icon: theme::Icon, hint: &str) -> bool {
         .clicked()
 }
 
-fn sync_label(ui: &mut Ui, status: &SyncStatus) {
+fn sync_label(ui: &mut Ui, status: &SyncStatus) -> bool {
     let (text, hover) = sync_text(status, local_offset());
-    let label = theme::pill(ui)
-        .show(ui, |ui| ui.label(RichText::new(text).small()))
-        .inner;
+    let mut text = RichText::new(text).small();
+    if *status == SyncStatus::KeyRejected {
+        text = text.color(RED);
+    }
+    let label = theme::pill(ui).show(ui, |ui| ui.label(text)).inner;
+    if key_problem(status).is_some() {
+        return label
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Open Settings")
+            .clicked();
+    }
     if let Some(hover) = hover {
         label.on_hover_text(hover);
     }
+    false
 }
 
 fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
@@ -745,6 +799,7 @@ fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
         SyncStatus::Off => ("Sync off".to_owned(), None),
         SyncStatus::Waiting => ("Waiting to sync".to_owned(), None),
         SyncStatus::Syncing => ("Syncing…".to_owned(), None),
+        SyncStatus::KeyRejected => ("Key rejected".to_owned(), None),
         SyncStatus::Synced { at, rejected } => {
             let text = format!("Synced {}", clock(*at, utc_offset));
             if rejected.is_empty() {
@@ -826,7 +881,24 @@ fn name_label(ui: &mut Ui, session: &Session, text: RichText) {
         .on_hover_text(format!("{}\n{}", session.project, session.id));
 }
 
-fn summary(session: &Session) -> String {
+fn summary_label(ui: &mut Ui, session: &Session, reserve: f32) {
+    let parts = summary_parts(session);
+    let widths: Vec<f32> = parts
+        .iter()
+        .map(|part| text_width(ui, RichText::new(part).small()))
+        .collect();
+    let width = (ui.available_width() - reserve).max(0.0);
+    let separator = text_width(ui, RichText::new(SUMMARY_SEPARATOR).small());
+    let shown = 1 + fitting(&widths[1..], separator, width - widths[0]);
+    let text = RichText::new(parts[..shown].join(SUMMARY_SEPARATOR))
+        .small()
+        .weak();
+    ui.allocate_ui(vec2(width, ROW_HEIGHT), |ui| {
+        ui.add(egui::Label::new(text).truncate())
+    });
+}
+
+fn summary_parts(session: &Session) -> Vec<String> {
     let mut parts = vec![
         session.model.clone(),
         format!("started at {}", format_tokens(session.start_context)),
@@ -834,7 +906,56 @@ fn summary(session: &Session) -> String {
     if session.compactions > 0 {
         parts.push(format!("compacted {}×", session.compactions));
     }
-    parts.join("  ·  ")
+    parts
+}
+
+fn title_parts(
+    available: f32,
+    gap: f32,
+    title_width: f32,
+    machine_width: f32,
+    live: bool,
+) -> (bool, bool) {
+    let room = available - if live { LIVE_PILL_WIDTH + gap } else { 0.0 };
+    let shown = fitting(&[title_width, machine_width], gap, room);
+    (shown >= 1, shown >= 2)
+}
+
+fn fitting(widths: &[f32], gap: f32, available: f32) -> usize {
+    let mut used = 0.0;
+    widths
+        .iter()
+        .take_while(|&&width| {
+            used += gap + width;
+            used <= available
+        })
+        .count()
+}
+
+fn idle_columns(width: f32, gap: f32) -> usize {
+    let base = ROW_HEIGHT + 2.0 * IDLE_VALUE_WIDTH + 3.0 * gap + IDLE_NAME_MIN_WIDTH;
+    fitting(&[IDLE_CONTEXT_WIDTH, IDLE_MODEL_WIDTH], gap, width - base)
+}
+
+fn text_width(ui: &Ui, text: impl Into<egui::WidgetText>) -> f32 {
+    text.into()
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x
+}
+
+fn centered<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let available = ui.available_rect_before_wrap();
+    let half = available.width().min(MAX_CONTENT_WIDTH) / 2.0;
+    let x = available.center().x;
+    let rect = egui::Rect::from_x_y_ranges(x - half..=x + half, available.y_range());
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add)
+        .inner
 }
 
 fn matches_query(session: &Session, query: &str) -> bool {
@@ -867,10 +988,42 @@ mod tests {
     }
 
     #[test]
-    fn api_key_banner_only_when_sync_is_off() {
-        assert!(needs_api_key(&SyncStatus::Off));
-        assert!(!needs_api_key(&SyncStatus::Waiting));
-        assert!(!needs_api_key(&SyncStatus::Syncing));
+    fn key_banner_amber_when_off_and_red_when_rejected() {
+        assert_eq!(key_problem(&SyncStatus::Off).unwrap().0, theme::AMBER);
+        let (color, message, button) = key_problem(&SyncStatus::KeyRejected).unwrap();
+        assert_eq!(color, RED);
+        assert_eq!(message, "API key rejected. Check it in Settings.");
+        assert_eq!(button, "Open Settings");
+        assert!(key_problem(&SyncStatus::Waiting).is_none());
+        assert!(key_problem(&SyncStatus::Syncing).is_none());
+        assert!(key_problem(&SyncStatus::Failed("HTTP 500".into())).is_none());
+    }
+
+    #[test]
+    fn live_pill_outranks_title_and_machine() {
+        assert_eq!(title_parts(400.0, 8.0, 150.0, 100.0, true), (true, true));
+        assert_eq!(title_parts(250.0, 8.0, 150.0, 100.0, true), (true, false));
+        assert_eq!(title_parts(150.0, 8.0, 150.0, 100.0, true), (false, false));
+        assert_eq!(title_parts(170.0, 8.0, 150.0, 100.0, false), (true, false));
+    }
+
+    #[test]
+    fn fitting_counts_leading_items_that_fit() {
+        assert_eq!(fitting(&[10.0, 20.0, 30.0], 5.0, 100.0), 3);
+        assert_eq!(fitting(&[10.0, 20.0, 30.0], 5.0, 70.0), 2);
+        assert_eq!(fitting(&[10.0, 20.0, 30.0], 5.0, 14.0), 0);
+        assert_eq!(fitting(&[10.0, 1.0], 5.0, -1.0), 0);
+        assert_eq!(fitting(&[], 5.0, 100.0), 0);
+    }
+
+    #[test]
+    fn idle_columns_hide_model_then_context_as_width_shrinks() {
+        assert_eq!(idle_columns(514.0, 8.0), 2);
+        assert_eq!(idle_columns(472.0, 8.0), 2);
+        assert_eq!(idle_columns(434.0, 8.0), 1);
+        assert_eq!(idle_columns(376.0, 8.0), 1);
+        assert_eq!(idle_columns(375.0, 8.0), 0);
+        assert_eq!(idle_columns(100.0, 8.0), 0);
     }
 
     #[test]
@@ -909,6 +1062,7 @@ s2: numbers must be >= 0"
         );
         assert_eq!(sync_text(&SyncStatus::Waiting, 0).0, "Waiting to sync");
         assert_eq!(sync_text(&SyncStatus::Syncing, 0).0, "Syncing…");
+        assert_eq!(sync_text(&SyncStatus::KeyRejected, 0).0, "Key rejected");
         assert_eq!(
             sync_text(&SyncStatus::Failed("HTTP 500: boom".into()), 0),
             (

@@ -35,6 +35,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    let _ = autostart::upgrade();
+    let hidden = autostart::launched_hidden(std::env::args());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(theme::WINDOW_SIZE)
@@ -44,7 +46,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         platform::APP_NAME,
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::App::new(cc, hidden)))),
     )
 }
 

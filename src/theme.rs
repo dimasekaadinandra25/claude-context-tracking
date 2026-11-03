@@ -1,7 +1,8 @@
 use eframe::egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
 use eframe::egui::{
-    Color32, Context, CornerRadius, Frame, LayerId, Margin, Mesh, Painter, Rect, Response, Sense,
-    Shadow, Shape, Stroke, TextStyle, Theme, Ui, Vec2, Visuals, pos2, vec2,
+    Color32, Context, CornerRadius, Frame, LayerId, Margin, Mesh, Painter, Rect, Response,
+    ScrollArea, Sense, Shadow, Shape, Stroke, TextStyle, Theme, Ui, UiBuilder, Vec2, Visuals,
+    Window, pos2, vec2,
 };
 use std::f32::consts::TAU;
 
@@ -28,10 +29,14 @@ const ZOOM_STEP: f32 = 0.05;
 const USER_ZOOM_STEP: f32 = 0.1;
 const MIN_USER_ZOOM: f32 = 0.7;
 const MAX_USER_ZOOM: f32 = 2.0;
+const DIALOG_CHROME: f32 = 48.0;
 const GLOW_SEGMENTS: usize = 64;
 const ICON_STROKE: f32 = 1.4;
 const REFRESH_GAP: f32 = 0.9;
 const REFRESH_STEPS: usize = 24;
+const SUN_RAYS: usize = 8;
+const GEAR_TEETH: usize = 8;
+const MOON_STEPS: usize = 20;
 const GLOW_MID: f32 = 0.55;
 const GLOW_MID_STRENGTH: f32 = 0.45;
 
@@ -51,6 +56,7 @@ struct Palette {
     border: Color32,
     text: Color32,
     strong_text: Color32,
+    weak_text: Color32,
     shadow: Color32,
     glows: [Glow; 2],
 }
@@ -65,6 +71,7 @@ const DARK: Palette = Palette {
     border: Color32::from_rgb(52, 44, 58),
     text: Color32::from_rgb(169, 161, 184),
     strong_text: Color32::from_rgb(245, 241, 250),
+    weak_text: Color32::from_rgb(150, 142, 166),
     shadow: Color32::from_rgba_premultiplied(0, 0, 0, 90),
     glows: [
         Glow {
@@ -90,6 +97,7 @@ const LIGHT: Palette = Palette {
     border: Color32::from_rgb(220, 210, 220),
     text: Color32::from_rgb(85, 76, 98),
     strong_text: Color32::from_rgb(30, 23, 38),
+    weak_text: Color32::from_rgb(104, 95, 117),
     shadow: Color32::from_rgba_premultiplied(10, 6, 12, 28),
     glows: [
         Glow {
@@ -148,8 +156,9 @@ fn visuals(mut visuals: Visuals, palette: &Palette) -> Visuals {
     visuals.faint_bg_color = palette.glass;
     visuals.extreme_bg_color = palette.field;
     visuals.hyperlink_color = ACCENT;
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.6);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.weak_text_color = Some(palette.weak_text);
 
     let widgets = &mut visuals.widgets;
     widgets.noninteractive.bg_fill = palette.window;
@@ -186,10 +195,29 @@ pub fn scale_to_window(ctx: &Context, user_zoom: &mut f32) {
         }
     });
     let zoom = ctx.zoom_factor();
-    let target = zoom_for(ctx.content_rect().size() * zoom) * *user_zoom;
+    let target = zoom_target(ctx.content_rect().size() * zoom, *user_zoom);
     if (target - zoom).abs() >= ZOOM_STEP / 2.0 {
         ctx.set_zoom_factor(target);
     }
+}
+
+fn zoom_target(size: Vec2, user_zoom: f32) -> f32 {
+    let fit = (size.x / MIN_WINDOW_SIZE[0]).max(1.0);
+    (zoom_for(size) * user_zoom).min(fit)
+}
+
+pub fn dialog(ctx: &Context, title: &str, open: &mut bool, add: impl FnOnce(&mut Ui)) {
+    let height = ctx.content_rect().height() - DIALOG_CHROME;
+    Window::new(title)
+        .open(open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+            ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                ScrollArea::vertical().show(ui, add)
+            });
+        });
 }
 
 fn zoom_for(size: Vec2) -> f32 {
@@ -261,6 +289,9 @@ pub enum Icon {
     Mini,
     Refresh,
     Search,
+    Sun,
+    Moon,
+    Gear,
 }
 
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
@@ -312,6 +343,23 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
                 stroke,
             );
         }
+        Icon::Sun => {
+            painter.circle_filled(rect.center(), unit * 0.34, color);
+            for (from, to) in rays(rect.center(), unit * 0.56, unit * 0.82, SUN_RAYS) {
+                painter.line_segment([from, to], stroke);
+            }
+        }
+        Icon::Moon => {
+            painter.add(crescent(rect.center(), unit * 0.62, color));
+        }
+        Icon::Gear => {
+            let teeth = Stroke::new(ICON_STROKE * 2.2, color);
+            for (from, to) in rays(rect.center(), unit * 0.5, unit * 0.8, GEAR_TEETH) {
+                painter.line_segment([from, to], teeth);
+            }
+            painter.circle_stroke(rect.center(), unit * 0.52, stroke);
+            painter.circle_stroke(rect.center(), unit * 0.2, stroke);
+        }
     }
 }
 
@@ -327,6 +375,74 @@ pub fn search_field(ui: &Ui, focused: bool) -> Frame {
         .stroke(Stroke::new(1.0, border))
         .corner_radius(PILL_RADIUS)
         .inner_margin(Margin::symmetric(10, 2))
+}
+
+fn rays(
+    center: eframe::egui::Pos2,
+    inner: f32,
+    outer: f32,
+    count: usize,
+) -> Vec<(eframe::egui::Pos2, eframe::egui::Pos2)> {
+    (0..count)
+        .map(|i| {
+            let angle = TAU * i as f32 / count as f32;
+            let direction = vec2(angle.cos(), angle.sin());
+            (center + direction * inner, center + direction * outer)
+        })
+        .collect()
+}
+
+fn crescent(center: eframe::egui::Pos2, radius: f32, color: Color32) -> Mesh {
+    let offset = vec2(radius * 0.55, -radius * 0.45);
+    let inner_center = center + offset;
+    let inner_radius = radius * 0.85;
+    let distance = offset.length();
+    let along =
+        (radius * radius - inner_radius * inner_radius + distance * distance) / (2.0 * distance);
+    let across = (radius * radius - along * along).max(0.0).sqrt();
+    let axis = offset / distance;
+    let normal = vec2(-axis.y, axis.x);
+    let base = center + axis * along;
+    let tips = [base + normal * across, base - normal * across];
+    let away = (-offset).angle();
+    let outer = arc_through(center, radius, tips, away);
+    let inner = arc_through(inner_center, inner_radius, tips, away);
+    let mut mesh = Mesh::default();
+    for (o, i) in outer.iter().zip(&inner) {
+        mesh.colored_vertex(*o, color);
+        mesh.colored_vertex(*i, color);
+    }
+    for k in 0..MOON_STEPS as u32 {
+        let a = 2 * k;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 3, a + 2);
+    }
+    mesh
+}
+
+fn arc_through(
+    center: eframe::egui::Pos2,
+    radius: f32,
+    tips: [eframe::egui::Pos2; 2],
+    via: f32,
+) -> Vec<eframe::egui::Pos2> {
+    let start = (tips[0] - center).angle();
+    let mut end = (tips[1] - center).angle();
+    let contains = |from: f32, to: f32| {
+        let span = (to - from).rem_euclid(TAU);
+        (via - from).rem_euclid(TAU) <= span
+    };
+    if contains(start, end) {
+        end = start + (end - start).rem_euclid(TAU);
+    } else {
+        end = start - (start - end).rem_euclid(TAU);
+    }
+    (0..=MOON_STEPS)
+        .map(|k| {
+            let angle = start + (end - start) * k as f32 / MOON_STEPS as f32;
+            center + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect()
 }
 
 fn refresh_arc(
@@ -438,6 +554,16 @@ mod tests {
     }
 
     #[test]
+    fn zoom_never_squeezes_content_below_minimum_width() {
+        assert_eq!(zoom_target(vec2(480.0, 360.0), 2.0), 1.0);
+        assert!((zoom_target(vec2(560.0, 640.0), 2.0) - 560.0 / 480.0).abs() < 1e-4);
+        assert!((zoom_target(vec2(1920.0, 1080.0), 2.0) - 3.0).abs() < 1e-4);
+        assert!((zoom_target(vec2(1920.0, 1080.0), 1.0) - 1.5).abs() < 1e-4);
+        assert!((zoom_target(vec2(480.0, 360.0), 0.7) - 0.7).abs() < 1e-4);
+        assert_eq!(zoom_target(vec2(340.0, 110.0), 1.5), 1.0);
+    }
+
+    #[test]
     fn refresh_arc_is_centered_with_head_at_the_end() {
         let center = pos2(10.0, 10.0);
         let (points, tip, base) = refresh_arc(center, 5.0);
@@ -450,6 +576,21 @@ mod tests {
         let end = *points.last().unwrap();
         assert!((base[0].distance(end) - base[1].distance(end)).abs() < 1e-3);
         assert!(tip.distance(end) > 0.0);
+    }
+
+    #[test]
+    fn crescent_is_a_closed_filled_strip_inside_the_icon() {
+        let center = pos2(10.0, 10.0);
+        let mesh = crescent(center, 6.0, ACCENT);
+        assert_eq!(mesh.vertices.len(), 2 * (MOON_STEPS + 1));
+        assert_eq!(mesh.indices.len(), 6 * MOON_STEPS);
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|v| v.pos.distance(center) <= 6.0 + 1e-3)
+        );
+        let first = &mesh.vertices[..2];
+        assert!(first[0].pos.distance(first[1].pos) < 1e-3);
     }
 
     #[test]

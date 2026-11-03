@@ -55,10 +55,21 @@ pub fn notify_full(session: &Session) {
         session.name(),
         session.usage_fraction() * 100.0
     );
+    notify("Context almost full", body);
+}
+
+pub fn notify_key_reminder() {
+    notify(
+        "Usage sync is off",
+        "Add your API key to send usage to the team dashboard".to_owned(),
+    );
+}
+
+fn notify(summary: &'static str, body: String) {
     std::thread::spawn(move || {
         let _ = notify_rust::Notification::new()
             .appname(APP_NAME)
-            .summary("Context almost full")
+            .summary(summary)
             .body(&body)
             .show();
     });

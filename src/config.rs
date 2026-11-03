@@ -20,6 +20,7 @@ pub struct Config {
     pub api_key: String,
     pub light_mode: bool,
     pub hide_titles: bool,
+    pub key_reminder_shown: bool,
 }
 
 impl Config {
@@ -68,9 +69,25 @@ pub fn dir() -> PathBuf {
         })
 }
 
+fn parse<T: for<'de> Deserialize<'de>>(text: &str) -> Option<T> {
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+}
+
 fn read<T: for<'de> Deserialize<'de>>(file: &str) -> Option<T> {
-    let text = std::fs::read_to_string(dir().join(file)).ok()?;
-    serde_json::from_str(&text).ok()
+    parse(&std::fs::read_to_string(dir().join(file)).ok()?)
+}
+
+fn editable() -> io::Result<Config> {
+    match std::fs::read_to_string(dir().join(CONFIG_FILE)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(error),
+        Ok(text) => parse(&text).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "config.json can't be read; fix or delete it before saving settings",
+            )
+        }),
+    }
 }
 
 fn write<T: Serialize>(file: &str, value: &T) -> io::Result<()> {
@@ -110,16 +127,27 @@ fn with_defaults(mut config: Config) -> Config {
 }
 
 pub fn save_settings(api_key: &str, hide_titles: bool) -> io::Result<()> {
-    let mut config = saved();
+    let mut config = editable()?;
     api_key.trim().clone_into(&mut config.api_key);
     config.hide_titles = hide_titles;
     write(CONFIG_FILE, &config)
 }
 
 pub fn save_light_mode(light_mode: bool) -> io::Result<()> {
-    let mut config = saved();
+    let mut config = editable()?;
     config.light_mode = light_mode;
     write(CONFIG_FILE, &config)
+}
+
+pub fn claim_key_reminder() -> bool {
+    let Ok(mut config) = editable() else {
+        return false;
+    };
+    if config.key_reminder_shown {
+        return false;
+    }
+    config.key_reminder_shown = true;
+    write(CONFIG_FILE, &config).is_ok()
 }
 
 pub fn load_watermark(config: &Config) -> Option<String> {
@@ -206,6 +234,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_watermark(&config), None);
+    }
+
+    #[test]
+    fn key_reminder_is_claimed_once_and_kept_by_settings() {
+        let _env = lock_env();
+        let dir = TempDir::new("config-reminder");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        assert!(claim_key_reminder());
+        assert!(!claim_key_reminder());
+        save_settings("key", true).unwrap();
+        save_light_mode(true).unwrap();
+        assert!(saved().key_reminder_shown);
+        assert!(!claim_key_reminder());
+    }
+
+    #[test]
+    fn config_with_byte_order_mark_is_read() {
+        let _env = lock_env();
+        let dir = TempDir::new("config-bom");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        std::fs::write(
+            dir.path().join(CONFIG_FILE),
+            "\u{feff}{\"api_key\": \"kept\", \"light_mode\": true}",
+        )
+        .unwrap();
+        let config = saved();
+        assert_eq!(config.api_key, "kept");
+        assert!(config.light_mode);
+    }
+
+    #[test]
+    fn unreadable_config_is_never_overwritten() {
+        let _env = lock_env();
+        let dir = TempDir::new("config-broken");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, "{\"api_key\": \"kept\",").unwrap();
+        assert!(!claim_key_reminder());
+        assert!(save_light_mode(true).is_err());
+        assert!(save_settings("other", false).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"api_key\": \"kept\","
+        );
     }
 
     #[test]

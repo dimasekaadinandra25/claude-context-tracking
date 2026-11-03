@@ -1,4 +1,5 @@
 use crate::platform;
+use crate::session::Session;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,10 @@ impl Overhead {
 
     pub fn total(&self) -> u64 {
         self.memory_tokens() + self.agent_tokens() + self.skills
+    }
+
+    pub fn system_tokens(&self, session: &Session) -> u64 {
+        session.system_context().saturating_sub(self.total())
     }
 }
 
