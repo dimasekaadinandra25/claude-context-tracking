@@ -68,6 +68,7 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
 
     section(ui, "SESSION");
     let offset = local_offset();
+    let activity = session.activity();
     key_values(
         ui,
         "session",
@@ -77,10 +78,24 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
             ("Peak context", format_tokens(session.peak_context)),
             ("Compactions", session.compactions.to_string()),
             ("Requests", session.requests.to_string()),
+            (
+                "Lines changed",
+                format!("+{} / -{}", activity.lines_added, activity.lines_removed),
+            ),
+            ("Commits", activity.commits.to_string()),
             ("First request", format_timestamp(&session.first_at, offset)),
             ("Last request", format_timestamp(&session.latest_at, offset)),
         ],
     );
+    let tools: Vec<(&str, String)> = session
+        .tool_calls()
+        .into_iter()
+        .map(|(tool, calls)| (tool, calls.to_string()))
+        .collect();
+    if !tools.is_empty() {
+        section(ui, "TOOL CALLS");
+        key_values(ui, "tool_calls", &tools);
+    }
     ui.add_space(4.0);
     ui.label(RichText::new(&session.project).small().weak());
     ui.label(RichText::new(&session.id).small().weak().monospace());

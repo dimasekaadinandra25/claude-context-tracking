@@ -96,9 +96,13 @@ fn session_line(ui: &mut Ui, session: &Session) {
     );
     let fraction = session.usage_fraction();
     theme::gradient_bar(ui, fraction, vec2(bar, BAR_HEIGHT));
-    ui.add_sized(
-        [PERCENT_WIDTH, LINE_HEIGHT],
-        Label::new(RichText::new(percent(fraction)).small()),
+    ui.allocate_ui_with_layout(
+        vec2(PERCENT_WIDTH, LINE_HEIGHT),
+        Layout::right_to_left(Align::Center),
+        |ui| {
+            ui.set_min_width(PERCENT_WIDTH);
+            ui.label(RichText::new(percent(fraction)).small());
+        },
     );
 }
 

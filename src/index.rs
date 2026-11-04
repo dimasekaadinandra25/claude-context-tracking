@@ -1,6 +1,8 @@
+use crate::activity;
 use crate::platform;
 use crate::session::{RequestUsage, Session};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -22,6 +24,7 @@ struct Record {
     is_sidechain: bool,
     message: Option<Message>,
     compact_metadata: Option<CompactMetadata>,
+    tool_use_result: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +39,13 @@ struct Message {
     id: Option<String>,
     model: Option<String>,
     usage: Option<RequestUsage>,
+    content: Option<Value>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct PendingTool {
+    tool: String,
+    commits: u32,
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -43,6 +53,7 @@ pub struct Index {
     sessions: HashMap<String, Session>,
     seen_messages: HashSet<String>,
     offsets: HashMap<PathBuf, u64>,
+    pending_tools: HashMap<String, PendingTool>,
 }
 
 impl Index {
@@ -125,6 +136,32 @@ impl Index {
             session.project = cwd;
         }
         let at = record.timestamp.unwrap_or_default();
+        if let Some(blocks) = record
+            .message
+            .as_ref()
+            .and_then(|message| message.content.as_ref())
+            .and_then(Value::as_array)
+        {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => record_tool_call(
+                        session,
+                        &mut self.seen_messages,
+                        &mut self.pending_tools,
+                        block,
+                        &at,
+                    ),
+                    Some("tool_result") => record_tool_result(
+                        session,
+                        &mut self.pending_tools,
+                        block,
+                        record.tool_use_result.as_ref(),
+                        &at,
+                    ),
+                    _ => {}
+                }
+            }
+        }
         if record.is_sidechain {
             if let Some((model, usage)) = new_request(&mut self.seen_messages, record.message) {
                 session.record_subagent_request(&model, usage, &at);
@@ -151,6 +188,62 @@ impl Index {
     }
 }
 
+fn record_tool_call(
+    session: &mut Session,
+    seen: &mut HashSet<String>,
+    pending: &mut HashMap<String, PendingTool>,
+    block: &Value,
+    at: &str,
+) {
+    let (Some(id), Some(name)) = (
+        block.get("id").and_then(Value::as_str),
+        block.get("name").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    if !seen.insert(id.to_owned()) {
+        return;
+    }
+    let tool = activity::tool_label(name);
+    if let Some(usage) = session.tool_mut(at, tool) {
+        usage.calls += 1;
+    }
+    pending.insert(
+        id.to_owned(),
+        PendingTool {
+            tool: tool.to_owned(),
+            commits: activity::commits_requested(name, block.get("input")),
+        },
+    );
+}
+
+fn record_tool_result(
+    session: &mut Session,
+    pending: &mut HashMap<String, PendingTool>,
+    block: &Value,
+    result: Option<&Value>,
+    at: &str,
+) {
+    let Some(tool) = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .and_then(|id| pending.remove(id))
+    else {
+        return;
+    };
+    if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    let (added, removed) = activity::changed_lines(result);
+    if (added > 0 || removed > 0 || tool.commits > 0)
+        && let Some(usage) = session.tool_mut(at, &tool.tool)
+    {
+        usage.lines_added += added;
+        usage.lines_removed += removed;
+        usage.commits += tool.commits;
+    }
+}
+
 fn new_request(
     seen: &mut HashSet<String>,
     message: Option<Message>,
@@ -159,6 +252,7 @@ fn new_request(
         id: Some(id),
         model: Some(model),
         usage: Some(usage),
+        ..
     }) = message
     else {
         return None;
@@ -359,6 +453,61 @@ mod tests {
             switched_model(&format!("{MODEL_SWITCH_MARKER}claude-haiku-4-5`")),
             Some(("claude-haiku-4-5".to_owned(), false))
         );
+    }
+
+    fn tool_call(id: &str, name: &str, command: &str, sidechain: bool) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":{sidechain},"sessionId":"s1","timestamp":"2026-01-01T09:10:00Z","message":{{"id":"m-{id}","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{"command":"{command}"}}}}]}}}}"#
+        )
+    }
+
+    fn tool_result(id: &str, error: bool, result: &str) -> String {
+        format!(
+            r#"{{"type":"user","sessionId":"s1","timestamp":"2026-01-01T10:05:00Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":{error}}}]}},"toolUseResult":{result}}}"#
+        )
+    }
+
+    fn tool_usage(index: &Index, hour: &str, tool: &str) -> crate::session::ToolUsage {
+        index.sessions["s1"].tools[&(format!("2026-01-01T{hour}:00:00Z"), tool.to_owned())]
+    }
+
+    #[test]
+    fn tool_calls_lines_and_commits_are_counted_once() {
+        let mut index = Index::default();
+        let edit = tool_call("t1", "Edit", "", false);
+        index.ingest(&edit, "s1");
+        index.ingest(&edit, "s1");
+        let patch = r#"{"structuredPatch":[{"lines":["-a","+b","+c"]}]}"#;
+        index.ingest(&tool_result("t1", false, patch), "s1");
+        index.ingest(&tool_result("t1", false, patch), "s1");
+        assert_eq!(tool_usage(&index, "09", "Edit").calls, 1);
+        let lines = tool_usage(&index, "10", "Edit");
+        assert_eq!((lines.lines_added, lines.lines_removed), (2, 1));
+        assert!(index.pending_tools.is_empty());
+    }
+
+    #[test]
+    fn failed_commits_do_not_count_but_successful_ones_do() {
+        let mut index = Index::default();
+        index.ingest(&tool_call("t1", "Bash", "git commit -m a", false), "s1");
+        index.ingest(&tool_result("t1", true, r#""Exit code 1""#), "s1");
+        assert_eq!(tool_usage(&index, "09", "Bash").calls, 1);
+        assert_eq!(index.sessions["s1"].activity().commits, 0);
+
+        index.ingest(&tool_call("t2", "Bash", "git commit -m b", false), "s1");
+        index.ingest(&tool_result("t2", false, r#"{"stdout":""}"#), "s1");
+        assert_eq!(tool_usage(&index, "10", "Bash").commits, 1);
+        assert_eq!(index.sessions["s1"].activity().commits, 1);
+    }
+
+    #[test]
+    fn subagent_and_mcp_tools_count_toward_the_session() {
+        let mut index = Index::default();
+        index.ingest(&tool_call("t1", "Read", "", true), "s1");
+        index.ingest(&tool_call("t2", "mcp__crm__search", "", false), "s1");
+        index.ingest(&tool_call("t3", "mcp__wiki__read", "", false), "s1");
+        let session = &index.sessions["s1"];
+        assert_eq!(session.tool_calls(), [("MCP", 2), ("Read", 1)]);
     }
 
     #[test]

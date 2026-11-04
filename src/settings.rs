@@ -1,12 +1,14 @@
 use crate::autostart;
 use crate::config;
+use crate::plan_limits;
 use crate::platform::APP_VERSION;
 use crate::theme::{self, RED};
 use eframe::egui::{self, RichText};
 use std::io;
 
 const FIELD_WIDTH: f32 = 320.0;
-const PRIVACY_HINT: &str = "Sync sends only models and token counts, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
+const PRIVACY_HINT: &str = "Sync sends only models, token counts, activity counts (lines, commits, tools) and plan limit percentages, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
+const PLAN_LIMITS_HINT: &str = "Adds a small step to Claude Code's status line to read your 5-hour and 7-day usage. Your current status line keeps working and no tokens are used. Pro, Max and Ultra plans only; the numbers appear after Claude's next reply.";
 
 pub struct Settings {
     api_key: String,
@@ -14,6 +16,8 @@ pub struct Settings {
     start_with_windows: bool,
     started_with_windows: bool,
     hide_titles: bool,
+    plan_limits: bool,
+    tracked_plan_limits: bool,
     error: Option<String>,
 }
 
@@ -21,12 +25,15 @@ impl Settings {
     pub fn load() -> Self {
         let saved = config::saved();
         let start_with_windows = autostart::is_enabled();
+        let plan_limits = plan_limits::is_enabled();
         Self {
             api_key: saved.api_key,
             key_from_env: config::api_key_from_env(),
             start_with_windows,
             started_with_windows: start_with_windows,
             hide_titles: saved.hide_titles,
+            plan_limits,
+            tracked_plan_limits: plan_limits,
             error: None,
         }
     }
@@ -35,6 +42,9 @@ impl Settings {
         config::save_settings(&self.api_key, self.hide_titles)?;
         if self.start_with_windows != self.started_with_windows {
             autostart::set(self.start_with_windows)?;
+        }
+        if self.plan_limits != self.tracked_plan_limits {
+            plan_limits::set(self.plan_limits)?;
         }
         Ok(())
     }
@@ -63,6 +73,8 @@ impl Settings {
                 "Hide session titles and project names",
             )
             .on_hover_text(PRIVACY_HINT);
+            ui.checkbox(&mut self.plan_limits, "Show Claude plan limits")
+                .on_hover_text(PLAN_LIMITS_HINT);
             save = ui.button("Save").clicked();
             if let Some(error) = &self.error {
                 ui.colored_label(RED, format!("Couldn't save: {error}"));

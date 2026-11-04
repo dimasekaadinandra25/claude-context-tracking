@@ -1,3 +1,4 @@
+use eframe::egui::epaint::{RectShape, TessellationOptions, Tessellator};
 use eframe::egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
 use eframe::egui::{
     Color32, Context, CornerRadius, Frame, LayerId, Margin, Mesh, Painter, Rect, Response,
@@ -507,7 +508,13 @@ pub fn gradient_bar(ui: &mut Ui, fraction: f32, size: Vec2) -> Response {
     let radius = rect.height() / 2.0;
     painter.rect_filled(rect, radius, palette(ui).track);
     let fraction = fraction.clamp(0.0, 1.0);
-    let filled = Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height()));
+    let filled = Rect::from_min_size(
+        rect.min,
+        vec2(
+            fill_width(rect.width(), rect.height(), fraction),
+            rect.height(),
+        ),
+    );
     let end = level_color(fraction).unwrap_or_else(|| ACCENT.lerp_to_gamma(VIOLET, fraction));
     gradient_fill(painter, filled, radius, ACCENT, end);
     response
@@ -517,32 +524,80 @@ fn gradient_fill(painter: &Painter, rect: Rect, radius: f32, from: Color32, to: 
     if rect.width() <= 0.0 {
         return;
     }
-    if rect.width() <= radius * 2.0 {
-        painter.rect_filled(rect, radius, from);
-        return;
-    }
-    let cap = vec2(radius * 2.0, rect.height());
-    painter.rect_filled(Rect::from_min_size(rect.min, cap), radius, from);
-    painter.rect_filled(
-        Rect::from_min_size(pos2(rect.right() - cap.x, rect.top()), cap),
+    let options = painter.ctx().tessellation_options(|options| *options);
+    painter.add(gradient_mesh(
+        rect,
         radius,
-        to,
-    );
-    let middle =
-        Rect::from_x_y_ranges(rect.left() + radius..=rect.right() - radius, rect.y_range());
+        (from, to),
+        painter.pixels_per_point(),
+        options,
+    ));
+}
+
+fn gradient_mesh(
+    rect: Rect,
+    radius: f32,
+    (from, to): (Color32, Color32),
+    pixels_per_point: f32,
+    options: TessellationOptions,
+) -> Mesh {
+    let mut tessellator = Tessellator::new(pixels_per_point, options, [1, 1], Vec::new());
     let mut mesh = Mesh::default();
-    mesh.colored_vertex(middle.left_top(), from);
-    mesh.colored_vertex(middle.right_top(), to);
-    mesh.colored_vertex(middle.right_bottom(), to);
-    mesh.colored_vertex(middle.left_bottom(), from);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(mesh);
+    tessellator.tessellate_rect(&RectShape::filled(rect, radius, Color32::WHITE), &mut mesh);
+    for vertex in &mut mesh.vertices {
+        let position = (vertex.pos.x - rect.left()) / rect.width();
+        vertex.color = from
+            .lerp_to_gamma(to, position.clamp(0.0, 1.0))
+            .gamma_multiply(f32::from(vertex.color.a()) / 255.0);
+    }
+    mesh
+}
+
+fn fill_width(track: f32, height: f32, fraction: f32) -> f32 {
+    if fraction <= 0.0 {
+        return 0.0;
+    }
+    (track * fraction).max(height).min(track)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_fills_stay_round_and_never_leave_the_track() {
+        assert_eq!(fill_width(100.0, 7.0, 0.0), 0.0);
+        assert_eq!(fill_width(100.0, 7.0, 0.02), 7.0);
+        assert_eq!(fill_width(100.0, 7.0, 0.5), 50.0);
+        assert_eq!(fill_width(100.0, 7.0, 1.0), 100.0);
+        assert_eq!(fill_width(4.0, 7.0, 0.5), 4.0);
+    }
+
+    #[test]
+    fn gradient_fill_is_one_shape_with_the_tracks_outline() {
+        let rect = Rect::from_min_size(pos2(10.0, 20.3), vec2(50.0, 7.0));
+        let options = TessellationOptions::default();
+        let mesh = gradient_mesh(rect, 3.5, (ACCENT, VIOLET), 1.0, options);
+        let mut track = Mesh::default();
+        Tessellator::new(1.0, options, [1, 1], Vec::new())
+            .tessellate_rect(&RectShape::filled(rect, 3.5, Color32::WHITE), &mut track);
+        assert_eq!(mesh.vertices.len(), track.vertices.len());
+        assert!(
+            mesh.vertices
+                .iter()
+                .zip(&track.vertices)
+                .all(|(a, b)| a.pos == b.pos && a.color.a() == b.color.a())
+        );
+        let solid = |x: f32| {
+            mesh.vertices
+                .iter()
+                .filter(|v| v.color.a() == 255)
+                .min_by(|a, b| (a.pos.x - x).abs().total_cmp(&(b.pos.x - x).abs()))
+                .unwrap()
+                .color
+        };
+        assert!(solid(rect.left()).r() > solid(rect.right()).r());
+    }
 
     #[test]
     fn zoom_grows_with_window_up_to_limit() {

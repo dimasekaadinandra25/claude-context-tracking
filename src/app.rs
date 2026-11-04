@@ -3,6 +3,7 @@ use crate::config;
 use crate::details;
 use crate::mini;
 use crate::overhead::{self, Overhead};
+use crate::plan_limits::{self, PlanLimits, Window};
 use crate::platform::{self, APP_NAME};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
@@ -51,6 +52,10 @@ const OLDER_THAN: Duration = Duration::from_secs(7 * 86_400);
 const SYNC_REASON_CHARS: usize = 60;
 const EMPTY_STATE_SPACE: f32 = 48.0;
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const PLAN_LIMITS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const PLAN_LIMIT_BAR_HEIGHT: f32 = 6.0;
+const PLAN_LIMIT_MIN_BAR: f32 = 24.0;
+const PLAN_LIMIT_ROW_HEIGHT: f32 = 18.0;
 const OVERHEAD_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NEW_CONTEXT_HINT: &str = "Context added since start. Keeps counting through /compact: a compaction adds nothing, growth after it adds on top.";
 const TOTAL_HINT: &str = "New context of the listed sessions since the app started; follows the search filter. The tray shows today's total instead.";
@@ -67,6 +72,8 @@ pub struct App {
     details_for: Option<String>,
     overheads: HashMap<String, Overhead>,
     overheads_refreshed: Option<Instant>,
+    plan_limits: Option<PlanLimits>,
+    plan_limits_refreshed: Option<Instant>,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -111,6 +118,8 @@ impl App {
             details_for: None,
             overheads: HashMap::new(),
             overheads_refreshed: None,
+            plan_limits: None,
+            plan_limits_refreshed: None,
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -244,7 +253,20 @@ impl App {
         {
             self.settings = Some(Settings::load());
         }
+        if let Some(limits) = &self.plan_limits {
+            plan_limits_row(ui, limits);
+        }
         ui.add_space(6.0);
+    }
+
+    fn refresh_plan_limits(&mut self) {
+        if self
+            .plan_limits_refreshed
+            .is_none_or(|at| at.elapsed() >= PLAN_LIMITS_REFRESH_INTERVAL)
+        {
+            self.plan_limits = plan_limits::load();
+            self.plan_limits_refreshed = Some(Instant::now());
+        }
     }
 
     fn refresh_overheads(&mut self) {
@@ -597,6 +619,7 @@ impl eframe::App for App {
         self.hide_to_tray_on_close(ctx);
         self.apply_updates(ctx);
         self.refresh_alerts();
+        self.refresh_plan_limits();
         ctx.request_repaint_after(ACTIVITY_REFRESH_INTERVAL);
     }
 
@@ -634,6 +657,52 @@ impl eframe::App for App {
             self.settings = None;
         }
     }
+}
+
+fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits) {
+    let now = plan_limits::unix_now();
+    let windows = limits.live(now);
+    if windows.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.columns(windows.len(), |columns| {
+        for (column, (label, window)) in columns.iter_mut().zip(windows) {
+            plan_limit_meter(column, label, window, now);
+        }
+    });
+}
+
+fn plan_limit_meter(ui: &mut Ui, label: &str, window: Window, now: u64) {
+    let fraction = (window.used_percentage / 100.0) as f32;
+    let left = format_age(Duration::from_secs(window.resets_at.saturating_sub(now)));
+    let percent = format!("{:.0}%", window.used_percentage);
+    let name = RichText::new(label).small().weak();
+    let mut value = RichText::new(&percent).small().strong();
+    if let Some(color) = theme::level_color(fraction) {
+        value = value.color(color);
+    }
+    let remaining = RichText::new(&left).small().weak();
+    let gap = ui.spacing().item_spacing.x;
+    let fixed = text_width(ui, name.clone()) + text_width(ui, value.clone()) + gap * 2.0;
+    let extra = text_width(ui, remaining.clone()) + gap;
+    let available = ui.available_width();
+    let show_remaining = available - fixed - extra >= PLAN_LIMIT_MIN_BAR;
+    let reserved = if show_remaining { fixed + extra } else { fixed };
+    let bar = (available - reserved).max(PLAN_LIMIT_MIN_BAR);
+    ui.allocate_ui_with_layout(
+        vec2(available, PLAN_LIMIT_ROW_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.label(name);
+            theme::gradient_bar(ui, fraction, vec2(bar, PLAN_LIMIT_BAR_HEIGHT))
+                .on_hover_text(format!("{percent} used, resets in {left}"));
+            ui.label(value);
+            if show_remaining {
+                ui.label(remaining);
+            }
+        },
+    );
 }
 
 fn empty_state(ui: &mut Ui, title: &str, detail: &str) {

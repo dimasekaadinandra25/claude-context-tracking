@@ -8,6 +8,7 @@ const CONFIG_FILE: &str = "config.json";
 const STATE_FILE: &str = "sync_state.json";
 const API_KEY_VAR: &str = "CLAUDE_USAGE_API_KEY";
 const SERVER_URL_VAR: &str = "CLAUDE_USAGE_SERVER_URL";
+const SYNC_DATA_VERSION: u32 = 1;
 const DEFAULT_SERVER_URL: &str = match option_env!("CLAUDE_USAGE_SERVER_URL") {
     Some(url) => url,
     None => "http://localhost:8080",
@@ -21,6 +22,7 @@ pub struct Config {
     pub light_mode: bool,
     pub hide_titles: bool,
     pub key_reminder_shown: bool,
+    pub chained_status_line: String,
 }
 
 impl Config {
@@ -33,6 +35,7 @@ impl Config {
             server_url: self.server_url.trim().trim_end_matches('/').to_owned(),
             key_hash: fingerprint(self.api_key.trim()),
             hide_titles: self.hide_titles,
+            data_version: SYNC_DATA_VERSION,
         }
     }
 }
@@ -43,6 +46,7 @@ pub struct SyncIdentity {
     server_url: String,
     key_hash: String,
     hide_titles: bool,
+    data_version: u32,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -139,6 +143,12 @@ pub fn save_light_mode(light_mode: bool) -> io::Result<()> {
     write(CONFIG_FILE, &config)
 }
 
+pub fn save_chained_status_line(command: &str) -> io::Result<()> {
+    let mut config = editable()?;
+    command.clone_into(&mut config.chained_status_line);
+    write(CONFIG_FILE, &config)
+}
+
 pub fn claim_key_reminder() -> bool {
     let Ok(mut config) = editable() else {
         return false;
@@ -228,6 +238,20 @@ mod tests {
             ..synced()
         };
         assert_eq!(load_watermark(&private), None);
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            serde_json::json!({
+                "watermark": "2026-10-30T01:00:00Z",
+                "identity": {
+                    "server_url": "http://team:8080",
+                    "key_hash": fingerprint("key"),
+                    "hide_titles": false
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(load_watermark(&config), None);
         std::fs::write(
             dir.path().join(STATE_FILE),
             r#"{"watermark":"2026-10-30T01:00:00Z"}"#,

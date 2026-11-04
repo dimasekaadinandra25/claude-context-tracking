@@ -1,6 +1,7 @@
 use crate::config::{self, Config, SyncIdentity};
 use crate::index::Index;
 use crate::overhead::{self, Overhead};
+use crate::plan_limits::{self, PlanLimits};
 use crate::platform::{self, APP_VERSION};
 use crate::session::{Session, unix_seconds};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ struct Payload<'a> {
     machine: &'a str,
     app_version: &'static str,
     sessions: Vec<SessionPayload<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_limits: Option<PlanLimits>,
 }
 
 #[derive(Serialize)]
@@ -41,6 +44,17 @@ struct SessionPayload<'a> {
     hours: Vec<HourPayload<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     overhead: Option<OverheadPayload>,
+    tools: Vec<ToolPayload<'a>>,
+}
+
+#[derive(Serialize)]
+struct ToolPayload<'a> {
+    hour: &'a str,
+    tool: &'a str,
+    calls: u32,
+    lines_added: u64,
+    lines_removed: u64,
+    commits: u32,
 }
 
 #[derive(Serialize)]
@@ -79,6 +93,7 @@ impl<'a> Payload<'a> {
                 .iter()
                 .map(|s| SessionPayload::new(s, hide_titles, overheads.get(&s.project)))
                 .collect(),
+            plan_limits: plan_limits::load(),
         }
     }
 }
@@ -127,6 +142,18 @@ impl<'a> SessionPayload<'a> {
                     agents_tokens: o.agent_tokens(),
                     skills_tokens: o.skills,
                 }),
+            tools: s
+                .tools
+                .iter()
+                .map(|((hour, tool), usage)| ToolPayload {
+                    hour,
+                    tool,
+                    calls: usage.calls,
+                    lines_added: usage.lines_added,
+                    lines_removed: usage.lines_removed,
+                    commits: usage.commits,
+                })
+                .collect(),
         }
     }
 }
@@ -234,16 +261,20 @@ pub fn chunks<'a>(sessions: &'a [Session], watermark: Option<&str>) -> Vec<Vec<&
     let mut rows = 0;
     for session in pending {
         let full = chunks.last().is_none_or(|chunk| {
-            chunk.len() >= MAX_SESSIONS || rows + session.hours.len() > MAX_HOUR_ROWS
+            chunk.len() >= MAX_SESSIONS || rows + row_count(session) > MAX_HOUR_ROWS
         });
         if full {
             chunks.push(Vec::new());
             rows = 0;
         }
-        rows += session.hours.len();
+        rows += row_count(session);
         chunks.last_mut().unwrap().push(session);
     }
     chunks
+}
+
+fn row_count(session: &Session) -> usize {
+    session.hours.len() + session.tools.len()
 }
 
 fn has_usage(session: &Session) -> bool {
@@ -424,6 +455,28 @@ mod tests {
     }
 
     #[test]
+    fn tool_activity_is_sent_per_hour_without_any_content() {
+        let mut session = Session::new("abc".into());
+        let usage = session.tool_mut("2026-10-30T02:10:00Z", "Edit").unwrap();
+        usage.calls = 3;
+        usage.lines_added = 12;
+        usage.lines_removed = 4;
+        usage.commits = 1;
+        let json = serde_json::to_value(SessionPayload::new(&session, false, None)).unwrap();
+        assert_eq!(
+            json["tools"],
+            serde_json::json!([{
+                "hour": "2026-10-30T02:00:00Z",
+                "tool": "Edit",
+                "calls": 3,
+                "lines_added": 12,
+                "lines_removed": 4,
+                "commits": 1,
+            }])
+        );
+    }
+
+    #[test]
     fn payload_matches_server_contract() {
         let mut session = Session::new("abc".into());
         session.project = r"C:\Code\RAG".into();
@@ -473,6 +526,7 @@ mod tests {
                 "session_id",
                 "start_context",
                 "title",
+                "tools",
             ]
         );
         assert_eq!(json["session_id"], "abc");

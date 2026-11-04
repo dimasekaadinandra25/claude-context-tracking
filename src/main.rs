@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activity;
 mod alerts;
 mod app;
 mod autostart;
@@ -10,6 +11,7 @@ mod export;
 mod index;
 mod mini;
 mod overhead;
+mod plan_limits;
 mod platform;
 mod session;
 mod settings;
@@ -25,6 +27,10 @@ use std::io::Write;
 fn main() -> eframe::Result {
     install_crash_log();
 
+    if std::env::args().any(|arg| arg == plan_limits::STATUS_LINE_FLAG) {
+        std::process::exit(plan_limits::run_status_line());
+    }
+
     if std::env::args().any(|arg| arg == "--dump") {
         print_snapshot();
         return Ok(());
@@ -36,6 +42,7 @@ fn main() -> eframe::Result {
     }
 
     let _ = autostart::upgrade();
+    let _ = plan_limits::keep_path_current();
     let hidden = autostart::launched_hidden(std::env::args());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

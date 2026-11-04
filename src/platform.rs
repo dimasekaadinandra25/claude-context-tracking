@@ -35,6 +35,23 @@ pub fn find_files(root: &Path, matches: impl Fn(&Path) -> bool) -> Vec<PathBuf> 
     files
 }
 
+#[cfg(windows)]
+pub fn git_bash() -> Option<PathBuf> {
+    let configured = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(PathBuf::from);
+    let beside_git = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .find(|dir| dir.join("git.exe").is_file())?
+            .parent()
+            .map(|root| root.join("bin").join("bash.exe"))
+    });
+    let default = std::env::var_os("ProgramFiles")
+        .map(|dir| PathBuf::from(dir).join("Git").join("bin").join("bash.exe"));
+    [configured, beside_git, default]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+}
+
 pub fn data_file() -> PathBuf {
     data_dir().join("usage.txt")
 }

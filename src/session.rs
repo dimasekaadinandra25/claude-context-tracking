@@ -41,6 +41,14 @@ impl HourUsage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUsage {
+    pub calls: u32,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub commits: u32,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -65,6 +73,8 @@ pub struct Session {
     #[serde(with = "crate::cache::pairs")]
     pub hours: BTreeMap<(String, String), HourUsage>,
     pub compactions_lifetime: u32,
+    #[serde(with = "crate::cache::pairs")]
+    pub tools: BTreeMap<(String, String), ToolUsage>,
 }
 
 impl Session {
@@ -139,6 +149,32 @@ impl Session {
     fn hour_mut(&mut self, at: &str, model: &str) -> Option<&mut HourUsage> {
         let hour = hour_key(at)?;
         Some(self.hours.entry((hour, model.to_owned())).or_default())
+    }
+
+    pub fn tool_mut(&mut self, at: &str, tool: &str) -> Option<&mut ToolUsage> {
+        let hour = hour_key(at)?;
+        Some(self.tools.entry((hour, tool.to_owned())).or_default())
+    }
+
+    pub fn activity(&self) -> ToolUsage {
+        self.tools
+            .values()
+            .fold(ToolUsage::default(), |total, usage| ToolUsage {
+                calls: total.calls + usage.calls,
+                lines_added: total.lines_added + usage.lines_added,
+                lines_removed: total.lines_removed + usage.lines_removed,
+                commits: total.commits + usage.commits,
+            })
+    }
+
+    pub fn tool_calls(&self) -> Vec<(&str, u32)> {
+        let mut calls = BTreeMap::new();
+        for ((_, tool), usage) in &self.tools {
+            *calls.entry(tool.as_str()).or_insert(0) += usage.calls;
+        }
+        let mut calls: Vec<_> = calls.into_iter().collect();
+        calls.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        calls
     }
 
     pub fn record_subagent_request(&mut self, model: &str, usage: RequestUsage, at: &str) {
