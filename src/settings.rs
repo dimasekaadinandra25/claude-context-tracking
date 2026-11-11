@@ -7,7 +7,7 @@ use eframe::egui::{self, RichText};
 use std::io;
 
 const FIELD_WIDTH: f32 = 320.0;
-const PRIVACY_HINT: &str = "Sync sends only models, token counts, activity counts (lines, commits, tools) and plan limit percentages, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
+const PRIVACY_HINT: &str = "Sync sends only models, token counts, activity counts (lines, commits, tools), plan limit percentages and your Claude account email and plan, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
 const PLAN_LIMITS_HINT: &str = "Adds a small step to Claude Code's status line to read your 5-hour and 7-day usage. Your current status line keeps working and no tokens are used. Pro, Max and Ultra plans only; the numbers appear after Claude's next reply.";
 
 pub struct Settings {

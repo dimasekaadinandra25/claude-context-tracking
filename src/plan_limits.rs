@@ -18,6 +18,7 @@ const TYPE_KEY: &str = "type";
 const COMMAND_TYPE: &str = "command";
 const FIVE_HOUR_LABEL: &str = "5h";
 const SEVEN_DAY_LABEL: &str = "7d";
+const ACCOUNT_FILE: &str = ".claude.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Window {
@@ -67,6 +68,52 @@ pub fn unix_now() -> u64 {
 
 fn path() -> PathBuf {
     config::dir().join(FILE_NAME)
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Account {
+    pub email: String,
+    pub plan: String,
+    pub tier: String,
+}
+
+#[derive(Deserialize)]
+struct ClaudeJson {
+    #[serde(rename = "oauthAccount")]
+    oauth_account: Option<OAuthAccount>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct OAuthAccount {
+    email_address: Option<String>,
+    plan_display_name: Option<String>,
+    user_rate_limit_tier: Option<String>,
+    organization_rate_limit_tier: Option<String>,
+}
+
+pub fn account() -> Option<Account> {
+    let file = match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir).join(ACCOUNT_FILE),
+        None => dirs::home_dir()?.join(ACCOUNT_FILE),
+    };
+    account_from(&std::fs::read_to_string(file).ok()?)
+}
+
+fn account_from(text: &str) -> Option<Account> {
+    let oauth = serde_json::from_str::<ClaudeJson>(text.trim_start_matches('\u{feff}'))
+        .ok()?
+        .oauth_account?;
+    let account = Account {
+        email: oauth.email_address.unwrap_or_default(),
+        plan: oauth.plan_display_name.unwrap_or_default(),
+        tier: oauth
+            .user_rate_limit_tier
+            .filter(|tier| !tier.is_empty())
+            .or(oauth.organization_rate_limit_tier)
+            .unwrap_or_default(),
+    };
+    (!account.email.is_empty() || !account.tier.is_empty()).then_some(account)
 }
 
 pub fn load() -> Option<PlanLimits> {
@@ -266,6 +313,24 @@ mod tests {
     fn settings_in(dir: &TempDir) -> PathBuf {
         unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
         dir.path().join(SETTINGS_FILE)
+    }
+
+    #[test]
+    fn reads_the_signed_in_account_and_prefers_the_user_tier() {
+        let text = "\u{feff}{\"numStartups\":3,\"oauthAccount\":{\"emailAddress\":\"a@b.c\",\"planDisplayName\":\"Max\",\"userRateLimitTier\":null,\"organizationRateLimitTier\":\"default_claude_max_20x\",\"accountUuid\":\"x\"}}";
+        assert_eq!(
+            account_from(text),
+            Some(Account {
+                email: "a@b.c".into(),
+                plan: "Max".into(),
+                tier: "default_claude_max_20x".into(),
+            })
+        );
+        let user = r#"{"oauthAccount":{"emailAddress":"a@b.c","userRateLimitTier":"default_claude_pro","organizationRateLimitTier":"org"}}"#;
+        assert_eq!(account_from(user).unwrap().tier, "default_claude_pro");
+        assert_eq!(account_from(r#"{"numStartups":3}"#), None);
+        assert_eq!(account_from(r#"{"oauthAccount":{}}"#), None);
+        assert_eq!(account_from("not json"), None);
     }
 
     #[test]

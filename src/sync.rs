@@ -1,7 +1,7 @@
 use crate::config::{self, Config, SyncIdentity};
 use crate::index::Index;
 use crate::overhead::{self, Overhead};
-use crate::plan_limits::{self, PlanLimits};
+use crate::plan_limits::{self, Account, PlanLimits};
 use crate::platform::{self, APP_VERSION};
 use crate::session::{Session, unix_seconds};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ struct Payload<'a> {
     sessions: Vec<SessionPayload<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan_limits: Option<PlanLimits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<Account>,
 }
 
 #[derive(Serialize)]
@@ -94,6 +96,7 @@ impl<'a> Payload<'a> {
                 .map(|s| SessionPayload::new(s, hide_titles, overheads.get(&s.project)))
                 .collect(),
             plan_limits: plan_limits::load(),
+            account: plan_limits::account(),
         }
     }
 }
