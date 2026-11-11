@@ -2,6 +2,7 @@ use crate::alerts::{self, FullWarnings};
 use crate::config;
 use crate::details;
 use crate::mini;
+use crate::models;
 use crate::overhead::{self, Overhead};
 use crate::plan_limits::{self, PlanLimits, Window};
 use crate::platform::{self, APP_NAME};
@@ -58,6 +59,7 @@ const PLAN_LIMIT_MIN_BAR: f32 = 24.0;
 const PLAN_LIMIT_ROW_HEIGHT: f32 = 18.0;
 const OVERHEAD_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NEW_CONTEXT_HINT: &str = "Context added since start. Keeps counting through /compact: a compaction adds nothing, growth after it adds on top.";
+const MODELS_HINT: &str = "Your usage per model over the last 7 days";
 const TOTAL_HINT: &str = "New context of the listed sessions since the app started; follows the search filter. The tray shows today's total instead.";
 static NO_OVERHEAD: Overhead = Overhead::EMPTY;
 
@@ -70,6 +72,7 @@ pub struct App {
     sessions: Vec<Session>,
     filter: String,
     details_for: Option<String>,
+    models_open: bool,
     overheads: HashMap<String, Overhead>,
     overheads_refreshed: Option<Instant>,
     plan_limits: Option<PlanLimits>,
@@ -116,6 +119,7 @@ impl App {
             sessions: Vec::new(),
             filter: String::new(),
             details_for: None,
+            models_open: false,
             overheads: HashMap::new(),
             overheads_refreshed: None,
             plan_limits: None,
@@ -337,6 +341,13 @@ impl App {
             ui,
             ROW_HEIGHT,
             |ui| {
+                if ui
+                    .link(RichText::new("Models").small())
+                    .on_hover_text(MODELS_HINT)
+                    .clicked()
+                {
+                    self.models_open = !self.models_open;
+                }
                 if shown > 2 {
                     ui.label(counts);
                 }
@@ -373,6 +384,20 @@ impl App {
         if !open {
             self.details_for = None;
         }
+    }
+
+    fn models_window(&mut self, ctx: &egui::Context) {
+        if !self.models_open {
+            return;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let rows = models::totals(&self.sessions, models::since(now));
+        let mut open = true;
+        theme::dialog(ctx, models::TITLE, &mut open, |ui| models::show(ui, &rows));
+        self.models_open = open;
     }
 
     fn sessions_list(&self, ui: &mut Ui, sort: &mut IdleSort) -> Option<String> {
@@ -651,6 +676,7 @@ impl eframe::App for App {
             self.details_for = opened;
         }
         self.details_window(ui.ctx());
+        self.models_window(ui.ctx());
         if let Some(settings) = &mut self.settings
             && settings.show(ui.ctx())
         {

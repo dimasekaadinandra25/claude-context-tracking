@@ -10,6 +10,7 @@ mod details;
 mod export;
 mod index;
 mod mini;
+mod models;
 mod overhead;
 mod plan_limits;
 mod platform;
