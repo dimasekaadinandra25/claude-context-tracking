@@ -180,11 +180,15 @@ struct IngestResult {
     latest_app_version: Option<String>,
 }
 
-type PlanReading = Option<[Option<f64>; 2]>;
+type PlanReading = Option<Vec<Option<f64>>>;
 
 fn plan_reading() -> PlanReading {
     plan_limits::load().map(|limits| {
-        [limits.five_hour, limits.seven_day].map(|window| window.map(|w| w.used_percentage))
+        [limits.five_hour, limits.seven_day]
+            .map(|window| window.map(|w| w.used_percentage))
+            .into_iter()
+            .chain(limits.models.iter().map(|m| Some(m.used_percentage)))
+            .collect()
     })
 }
 

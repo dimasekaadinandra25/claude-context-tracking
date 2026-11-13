@@ -33,11 +33,20 @@ pub struct Window {
     pub resets_at: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelLimit {
+    pub name: String,
+    pub used_percentage: f64,
+    pub resets_at: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlanLimits {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelLimit>,
     pub captured_at: u64,
 }
 
@@ -141,6 +150,47 @@ struct OAuthToken {
 struct UsageResponse {
     five_hour: Option<UsageWindow>,
     seven_day: Option<UsageWindow>,
+    limits: Vec<serde_json::Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct UsageLimit {
+    kind: String,
+    percent: Option<f64>,
+    resets_at: Option<String>,
+    scope: Option<LimitScope>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LimitScope {
+    model: Option<ScopeModel>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ScopeModel {
+    display_name: Option<String>,
+}
+
+const WEEKLY_SCOPED: &str = "weekly_scoped";
+
+impl UsageLimit {
+    fn model_limit(self) -> Option<ModelLimit> {
+        if self.kind != WEEKLY_SCOPED {
+            return None;
+        }
+        Some(ModelLimit {
+            name: self
+                .scope?
+                .model?
+                .display_name
+                .filter(|name| !name.is_empty())?,
+            used_percentage: self.percent?,
+            resets_at: crate::session::unix_seconds(&self.resets_at?)?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -170,9 +220,19 @@ fn limits_from(body: &str, now: u64) -> Option<PlanLimits> {
     let usage = serde_json::from_str::<UsageResponse>(body).ok()?;
     let five_hour = usage.five_hour.as_ref().and_then(UsageWindow::window);
     let seven_day = usage.seven_day.as_ref().and_then(UsageWindow::window);
+    let models = usage
+        .limits
+        .into_iter()
+        .filter_map(|limit| {
+            serde_json::from_value::<UsageLimit>(limit)
+                .ok()?
+                .model_limit()
+        })
+        .collect();
     (five_hour.is_some() || seven_day.is_some()).then_some(PlanLimits {
         five_hour,
         seven_day,
+        models,
         captured_at: now,
     })
 }
@@ -231,6 +291,7 @@ fn captured(input: &str, now: u64) -> Option<PlanLimits> {
     (limits.five_hour.is_some() || limits.seven_day.is_some()).then_some(PlanLimits {
         five_hour: limits.five_hour,
         seven_day: limits.seven_day,
+        models: Vec::new(),
         captured_at: now,
     })
 }
@@ -238,10 +299,11 @@ fn captured(input: &str, now: u64) -> Option<PlanLimits> {
 pub fn run_status_line() -> i32 {
     let mut input = String::new();
     let _ = io::stdin().read_to_string(&mut input);
-    if let Some(limits) = captured(&input, unix_now())
-        && let Ok(text) = serde_json::to_string(&limits)
-    {
-        let _ = write_atomic(&path(), &text);
+    if let Some(mut limits) = captured(&input, unix_now()) {
+        limits.models = load().map(|saved| saved.models).unwrap_or_default();
+        if let Ok(text) = serde_json::to_string(&limits) {
+            let _ = write_atomic(&path(), &text);
+        }
     }
     chain(&config::saved().chained_status_line, &input)
 }
@@ -415,8 +477,21 @@ mod tests {
 
     #[test]
     fn usage_endpoint_reply_becomes_plan_limits() {
-        let body = r#"{"five_hour":null,"seven_day":{"utilization":19.5,"resets_at":"2026-11-18T15:00:00.033648+00:00"},"limits":[]}"#;
+        let body = r#"{"five_hour":null,"seven_day":{"utilization":19.5,"resets_at":"2026-11-18T15:00:00.033648+00:00"},"limits":[
+            {"kind":"weekly_all","percent":19,"resets_at":"2026-11-18T15:00:00Z","scope":null},
+            {"kind":"weekly_scoped","percent":4,"resets_at":"2026-11-18T15:00:00+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false},
+            {"kind":"weekly_scoped","percent":"bad","scope":{"model":{"display_name":"Odd"}}},
+            {"kind":"weekly_scoped","percent":1,"resets_at":"2026-11-18T15:00:00Z","scope":{"surface":"web"}}
+        ]}"#;
         let limits = limits_from(body, 7).unwrap();
+        assert_eq!(
+            limits.models,
+            [ModelLimit {
+                name: "Fable".into(),
+                used_percentage: 4.0,
+                resets_at: 1_795_014_000
+            }]
+        );
         assert_eq!(limits.five_hour, None);
         assert_eq!(
             limits.seven_day,
@@ -499,6 +574,7 @@ mod tests {
                 used_percentage: 20.0,
                 resets_at: 300,
             }),
+            models: Vec::new(),
             captured_at: 50,
         };
         assert_eq!(limits.live(50).len(), 2);
