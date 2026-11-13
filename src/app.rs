@@ -78,6 +78,7 @@ pub struct App {
     plan_limits: Option<PlanLimits>,
     plan_limits_refreshed: Option<Instant>,
     limit_warnings: LimitWarnings,
+    cost_rate: Option<f64>,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -126,6 +127,7 @@ impl App {
             plan_limits: None,
             plan_limits_refreshed: None,
             limit_warnings: LimitWarnings::default(),
+            cost_rate: None,
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -154,7 +156,15 @@ impl App {
             match update {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
-                Update::Sync(status) => self.sync = status,
+                Update::Sync(status) => {
+                    if let SyncStatus::Synced {
+                        rate: Some(rate), ..
+                    } = &status
+                    {
+                        self.cost_rate = Some(*rate);
+                    }
+                    self.sync = status;
+                }
                 Update::ToggleMini => toggle_mini = !toggle_mini,
             }
         }
@@ -274,6 +284,17 @@ impl App {
             self.plan_limits_refreshed = Some(Instant::now());
             if let Some(limits) = &self.plan_limits {
                 let now = plan_limits::unix_now();
+                if let Some(window) = limits.seven_day.filter(|w| w.resets_at > now) {
+                    let saved = crate::budget::load();
+                    let day = alerts::day_start(now, local_offset());
+                    let (state, over) = crate::budget::step(saved.clone(), day, window, now);
+                    if saved.as_ref() != Some(&state) {
+                        crate::budget::save(&state);
+                    }
+                    if let Some(over) = over {
+                        alerts::notify_over_budget(&over);
+                    }
+                }
                 for (label, window) in self.limit_warnings.newly_crossed(&limits.live(now)) {
                     let left =
                         format_age(Duration::from_secs(window.resets_at.saturating_sub(now)));
@@ -389,7 +410,7 @@ impl App {
         };
         let mut open = true;
         theme::dialog(ctx, "Context usage", &mut open, |ui| {
-            details::show(ui, session, self.overhead(session))
+            details::show(ui, session, self.overhead(session), self.cost_rate)
         });
         if !open {
             self.details_for = None;
@@ -644,7 +665,7 @@ impl App {
         let clicked = response.clicked();
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_ui(|ui| details::show(ui, session, self.overhead(session)));
+            .on_hover_ui(|ui| details::show(ui, session, self.overhead(session), self.cost_rate));
         clicked
     }
 }
@@ -949,6 +970,7 @@ fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
             at,
             rejected,
             update,
+            ..
         } => {
             let mut text = format!("Synced {}", clock(*at, utc_offset));
             let mut hover: Vec<String> = rejected
@@ -1189,6 +1211,7 @@ mod tests {
             at: at(),
             rejected,
             update: None,
+            rate: None,
         };
         assert_eq!(
             sync_text(&synced(Vec::new()), 7 * HOUR),
@@ -1215,6 +1238,7 @@ s2: numbers must be >= 0"
                     at: at(),
                     rejected: Vec::new(),
                     update: Some("9.0.0".into()),
+                    rate: None,
                 },
                 7 * HOUR
             ),

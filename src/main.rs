@@ -4,6 +4,7 @@ mod activity;
 mod alerts;
 mod app;
 mod autostart;
+mod budget;
 mod cache;
 mod config;
 mod details;

@@ -23,7 +23,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Optional **Start with Windows** (in ⚙ Settings); started that way it stays hidden in the tray
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
 - Optionally syncs usage to a team server every 30 minutes, on demand with **Sync now**, and once more on **Quit**
-- Shows your Claude plan's 5-hour and 7-day limits, plus any weekly limit Claude sets for a single model (such as Fable) as its own meter. Hover a weekly meter for the daily budget left and the projected use at reset. A Windows notification appears when a limit passes 80% and again at 90% (once per window; limits already past a step when the app starts stay quiet). Every 5 minutes it asks Anthropic's usage endpoint (the one `/usage` shows) with Claude Code's own sign-in from `~/.claude/.credentials.json`, so it works when you only use the VS Code panel. The token is only sent to Anthropic, never refreshed (an expired one is skipped until Claude Code renews it) and never sent to the team server. Running `claude` in a terminal also reports the limits through the status line
+- Shows your Claude plan's 5-hour and 7-day limits, plus any weekly limit Claude sets for a single model (such as Fable) as its own meter. Hover a weekly meter for the daily budget left and the projected use at reset. A Windows notification appears when a limit passes 80% and again at 90% (once per window; limits already past a step when the app starts stay quiet). At the first reading of each local day the app sets today's budget (what is left of the week spread over the days left); if the weekly limit grows by more than that during the day, one notification says so. Every 5 minutes it asks Anthropic's usage endpoint (the one `/usage` shows) with Claude Code's own sign-in from `~/.claude/.credentials.json`, so it works when you only use the VS Code panel. The token is only sent to Anthropic, never refreshed (an expired one is skipped until Claude Code renews it) and never sent to the team server. Running `claude` in a terminal also reports the limits through the status line
 - Windows installer (Inno Setup) built by CI
 - Runs on Windows, macOS and Linux
 
@@ -147,6 +147,7 @@ Hover over a session's context bar (marked ⓘ) to see a breakdown; click it to 
 | Latest request | Cache read, cache write, uncached input and output tokens of the most recent request |
 | New context by model | How much of **New context** each model added, when the session grew (one row per model) |
 | Session | Start, new and peak context, compactions, request count, first and last request time (local time), project path and session id |
+| Estimated plan cost | The session's tokens (input including cache, output and subagent output counted 5×) times this week's rate for your Claude account: its weekly allowance used so far divided by all its members' tokens this week. The rate comes back with each sync, so it shows once the app has synced |
 
 How the categories are worked out:
 

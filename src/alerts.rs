@@ -98,6 +98,16 @@ pub fn notify_limit(name: &str, window: Window, resets_in: &str) {
     );
 }
 
+pub fn notify_over_budget(over: &crate::budget::OverBudget) {
+    notify(
+        "Today's Claude use is over budget",
+        format!(
+            "{:.1}% of the weekly limit was used today, more than today's budget of {:.1}%. Slow down to make the week last.",
+            over.used_today, over.budget
+        ),
+    );
+}
+
 pub fn notify_key_reminder() {
     notify(
         "Usage sync is off",

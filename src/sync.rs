@@ -178,6 +178,7 @@ struct Envelope {
 struct IngestResult {
     rejected: Vec<Rejection>,
     latest_app_version: Option<String>,
+    cost_per_million_tokens: Option<f64>,
 }
 
 type PlanReading = Option<u64>;
@@ -206,6 +207,7 @@ pub enum SyncStatus {
         at: SystemTime,
         rejected: Vec<Rejection>,
         update: Option<String>,
+        rate: Option<f64>,
     },
     KeyRejected,
     Failed(String),
@@ -353,6 +355,7 @@ fn run_with(
     );
     let mut rejected = Vec::new();
     let mut latest = None;
+    let mut rate = None;
     let mut overheads = HashMap::new();
     let mut batches = chunks(sessions, config::load_watermark(config).as_deref());
     if batches.is_empty() {
@@ -374,6 +377,7 @@ fn run_with(
                 let result = ingest_result(&response);
                 rejected.extend(result.rejected);
                 latest = result.latest_app_version.or(latest);
+                rate = result.cost_per_million_tokens.or(rate);
             }
             Err(status) => return status,
         }
@@ -387,6 +391,7 @@ fn run_with(
         at: SystemTime::now(),
         rejected,
         update: latest.filter(|version| is_newer(version, APP_VERSION)),
+        rate,
     }
 }
 
@@ -940,6 +945,14 @@ mod tests {
         assert_eq!(update(reply("999.0.0")), Some("999.0.0".to_owned()));
         assert_eq!(update(reply(APP_VERSION)), None);
         assert_eq!(update(String::new()), None);
+        let rate = run_with(
+            |_, _, _| Ok(r#"{"data":{"accepted":1,"cost_per_million_tokens":1.25}}"#.to_owned()),
+            |_| Overhead::default(),
+            &enabled(),
+            &sessions,
+            "PC",
+        );
+        assert!(matches!(rate, SyncStatus::Synced { rate: Some(r), .. } if r == 1.25));
         assert!(is_newer("0.10.0", "0.9.1"));
         assert!(!is_newer("0.2.0", "0.2.0-dev"));
     }

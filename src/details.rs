@@ -21,7 +21,24 @@ struct Category {
     hint: &'static str,
 }
 
-pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
+const OUTPUT_WEIGHT: u64 = 5;
+const MILLION: f64 = 1_000_000.0;
+
+pub fn estimated_cost(session: &Session, rate: f64) -> Option<f64> {
+    let weight: u64 = session
+        .hours
+        .values()
+        .map(|h| {
+            h.input_tokens
+                + h.cache_write_tokens
+                + h.cache_read_tokens
+                + OUTPUT_WEIGHT * (h.output_tokens + h.subagent_output_tokens)
+        })
+        .sum();
+    (weight > 0 && rate > 0.0).then(|| weight as f64 / MILLION * rate)
+}
+
+pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead, cost_rate: Option<f64>) {
     ui.set_width(PANEL_WIDTH);
     ui.label(RichText::new(&session.model).strong());
     ui.label(format!(
@@ -87,6 +104,14 @@ pub fn show(ui: &mut Ui, session: &Session, overhead: &Overhead) {
             ("Last request", format_timestamp(&session.latest_at, offset)),
         ],
     );
+    if let Some(cost) = cost_rate.and_then(|rate| estimated_cost(session, rate)) {
+        section(ui, "ESTIMATED PLAN COST");
+        key_values(
+            ui,
+            "estimated_cost",
+            &[("At this week's rate", format!("≈ ${cost:.2}"))],
+        );
+    }
     let tools: Vec<(&str, String)> = session
         .tool_calls()
         .into_iter()
@@ -264,6 +289,24 @@ fn format_timestamp(at: &str, utc_offset: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimated_cost_weighs_output_five_times_including_subagents() {
+        let mut session = Session::new("s".into());
+        session.hours.insert(
+            ("2026-11-13T02:00:00Z".into(), "m".into()),
+            crate::session::HourUsage {
+                cache_read_tokens: 900_000,
+                output_tokens: 10_000,
+                subagent_output_tokens: 10_000,
+                ..Default::default()
+            },
+        );
+        let cost = estimated_cost(&session, 2.0).unwrap();
+        assert!((cost - 2.0).abs() < 1e-9, "{cost}");
+        assert_eq!(estimated_cost(&session, 0.0), None);
+        assert_eq!(estimated_cost(&Session::new("empty".into()), 2.0), None);
+    }
 
     #[test]
     fn percent_formats_small_and_regular_shares() {
