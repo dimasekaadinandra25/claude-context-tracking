@@ -52,6 +52,53 @@ pub fn git_bash() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+#[cfg(windows)]
+pub fn use_exe_icon_on_taskbar(window: &impl raw_window_handle::HasWindowHandle) {
+    const WM_SETICON: u32 = 0x0080;
+    const ICON_BIG: usize = 1;
+    const IMAGE_ICON: u32 = 1;
+    const LR_DEFAULTSIZE: u32 = 0x0040;
+    const APP_ICON_ID: usize = 1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> isize;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn LoadImageW(
+            instance: isize,
+            name: *const u16,
+            kind: u32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> isize;
+        fn SendMessageW(window: isize, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        let icon = LoadImageW(
+            GetModuleHandleW(std::ptr::null()),
+            APP_ICON_ID as *const u16,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE,
+        );
+        if icon != 0 {
+            SendMessageW(win32.hwnd.get(), WM_SETICON, ICON_BIG, icon);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn use_exe_icon_on_taskbar(_window: &impl raw_window_handle::HasWindowHandle) {}
+
 pub fn data_file() -> PathBuf {
     data_dir().join("usage.txt")
 }

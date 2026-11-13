@@ -62,7 +62,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         platform::APP_NAME,
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc, hidden)))),
+        Box::new(|cc| {
+            platform::use_exe_icon_on_taskbar(cc);
+            Ok(Box::new(app::App::new(cc, hidden)))
+        }),
     )
 }
 
