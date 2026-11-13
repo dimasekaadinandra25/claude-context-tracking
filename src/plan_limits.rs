@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const STATUS_LINE_FLAG: &str = "--statusline";
 const FILE_NAME: &str = "plan_limits.json";
@@ -19,6 +20,12 @@ const COMMAND_TYPE: &str = "command";
 const FIVE_HOUR_LABEL: &str = "5h";
 const SEVEN_DAY_LABEL: &str = "7d";
 const ACCOUNT_FILE: &str = ".claude.json";
+const CREDENTIALS_FILE: &str = ".credentials.json";
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
+const TOKEN_MARGIN_MS: u64 = 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Window {
@@ -114,6 +121,103 @@ fn account_from(text: &str) -> Option<Account> {
             .unwrap_or_default(),
     };
     (!account.email.is_empty() || !account.tier.is_empty()).then_some(account)
+}
+
+#[derive(Deserialize)]
+struct Credentials {
+    #[serde(rename = "claudeAiOauth")]
+    oauth: Option<OAuthToken>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthToken {
+    access_token: String,
+    expires_at: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct UsageResponse {
+    five_hour: Option<UsageWindow>,
+    seven_day: Option<UsageWindow>,
+}
+
+#[derive(Deserialize)]
+struct UsageWindow {
+    utilization: f64,
+    resets_at: String,
+}
+
+impl UsageWindow {
+    fn window(&self) -> Option<Window> {
+        Some(Window {
+            used_percentage: self.utilization,
+            resets_at: crate::session::unix_seconds(&self.resets_at)?,
+        })
+    }
+}
+
+fn access_token(credentials: &str, now: u64) -> Option<String> {
+    let token = serde_json::from_str::<Credentials>(credentials.trim_start_matches('\u{feff}'))
+        .ok()?
+        .oauth?;
+    (token.expires_at > now * 1_000 + TOKEN_MARGIN_MS && !token.access_token.is_empty())
+        .then_some(token.access_token)
+}
+
+fn limits_from(body: &str, now: u64) -> Option<PlanLimits> {
+    let usage = serde_json::from_str::<UsageResponse>(body).ok()?;
+    let five_hour = usage.five_hour.as_ref().and_then(UsageWindow::window);
+    let seven_day = usage.seven_day.as_ref().and_then(UsageWindow::window);
+    (five_hour.is_some() || seven_day.is_some()).then_some(PlanLimits {
+        five_hour,
+        seven_day,
+        captured_at: now,
+    })
+}
+
+fn fetch(now: u64) -> Option<PlanLimits> {
+    let credentials =
+        std::fs::read_to_string(platform::claude_dir().join(CREDENTIALS_FILE)).ok()?;
+    let token = access_token(&credentials, now)?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(USAGE_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(USAGE_URL)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("anthropic-beta", OAUTH_BETA)
+        .call()
+        .ok()?;
+    limits_from(&response.body_mut().read_to_string().ok()?, now)
+}
+
+#[derive(Default)]
+pub struct UsagePoller {
+    last_run: Option<Instant>,
+    running: Option<JoinHandle<()>>,
+}
+
+impl UsagePoller {
+    pub fn tick(&mut self) {
+        if self.running.as_ref().is_some_and(|run| !run.is_finished())
+            || self
+                .last_run
+                .is_some_and(|at| at.elapsed() < USAGE_POLL_INTERVAL)
+        {
+            return;
+        }
+        self.last_run = Some(Instant::now());
+        self.running = Some(std::thread::spawn(|| {
+            if let Some(limits) = fetch(unix_now())
+                && let Ok(text) = serde_json::to_string(&limits)
+            {
+                let _ = write_atomic(&path(), &text);
+            }
+        }));
+    }
 }
 
 pub fn load() -> Option<PlanLimits> {
@@ -308,6 +412,42 @@ mod tests {
     use crate::platform::{TempDir, lock_env};
 
     const OURS: &str = "\"C:/Apps/claude-usage-monitor.exe\" --statusline";
+
+    #[test]
+    fn usage_endpoint_reply_becomes_plan_limits() {
+        let body = r#"{"five_hour":null,"seven_day":{"utilization":19.5,"resets_at":"2026-11-18T15:00:00.033648+00:00"},"limits":[]}"#;
+        let limits = limits_from(body, 7).unwrap();
+        assert_eq!(limits.five_hour, None);
+        assert_eq!(
+            limits.seven_day,
+            Some(Window {
+                used_percentage: 19.5,
+                resets_at: 1_795_014_000
+            })
+        );
+        assert_eq!(limits.captured_at, 7);
+        assert_eq!(
+            limits_from(r#"{"five_hour":null,"seven_day":null}"#, 7),
+            None
+        );
+        assert_eq!(limits_from("<html>", 7), None);
+    }
+
+    #[test]
+    fn only_a_token_that_is_still_valid_is_used() {
+        let credentials = |expires: u64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"tok","refreshToken":"r","expiresAt":{expires}}}}}"#
+            )
+        };
+        let now = 1_000;
+        assert_eq!(
+            access_token(&credentials(now * 1_000 + 3_600_000), now).as_deref(),
+            Some("tok")
+        );
+        assert_eq!(access_token(&credentials(now * 1_000 + 30_000), now), None);
+        assert_eq!(access_token("{}", now), None);
+    }
     const THEIRS: &str = "powershell -File \"C:\\Users\\me\\line.ps1\"";
 
     fn settings_in(dir: &TempDir) -> PathBuf {

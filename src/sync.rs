@@ -249,13 +249,11 @@ impl Syncer {
         }
         let config = config::load();
         let plan = plan_reading();
-        let due = match self.last_run {
-            Some(at) => {
-                at.elapsed() >= SYNC_INTERVAL
-                    || (plan != self.last_plan && at.elapsed() >= PLAN_SYNC_GAP)
-            }
-            None => self.started.elapsed() >= STARTUP_DELAY,
-        };
+        let due = is_due(
+            self.last_run.map(|at| at.elapsed()),
+            self.started.elapsed(),
+            plan != self.last_plan,
+        );
         if !due && !self.requested && config.sync_identity() == self.last_identity {
             return;
         }
@@ -279,6 +277,13 @@ impl Syncer {
             let _ = run.join();
         }
         run_with(post, estimate, &config::load(), &index.snapshot(), machine);
+    }
+}
+
+fn is_due(since_last: Option<Duration>, since_start: Duration, plan_changed: bool) -> bool {
+    match since_last {
+        Some(elapsed) => elapsed >= SYNC_INTERVAL || (plan_changed && elapsed >= PLAN_SYNC_GAP),
+        None => since_start >= STARTUP_DELAY,
     }
 }
 
@@ -867,6 +872,17 @@ mod tests {
         );
         assert_eq!(rejections(r#"{"data":{"accepted":3},"message":"ok"}"#), []);
         assert_eq!(rejections("not json"), []);
+    }
+
+    #[test]
+    fn a_new_plan_reading_syncs_after_five_minutes_instead_of_thirty() {
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        assert!(!is_due(None, Duration::from_secs(30), false));
+        assert!(is_due(None, minutes(1), false));
+        assert!(!is_due(Some(minutes(4)), minutes(60), true));
+        assert!(is_due(Some(minutes(5)), minutes(60), true));
+        assert!(!is_due(Some(minutes(29)), minutes(60), false));
+        assert!(is_due(Some(minutes(30)), minutes(60), false));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::cache;
 use crate::export::{to_tsv, write_atomic};
 use crate::index::Index;
+use crate::plan_limits::UsagePoller;
 use crate::platform;
 use crate::session::Session;
 use crate::sync::{SyncStatus, Syncer};
@@ -54,6 +55,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
     let machine = platform::machine_name();
     let mut exporter = Exporter::new(machine.clone());
     let mut syncer = Syncer::new();
+    let mut usage = UsagePoller::default();
     let mut changed = true;
     loop {
         if changed {
@@ -63,6 +65,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
             ctx.request_repaint();
         }
         exporter.tick(&index);
+        usage.tick();
         cache.tick(&index);
         let (sync_tx, sync_ctx) = (tx.clone(), ctx.clone());
         syncer.tick(&index, &machine, move |status| {
