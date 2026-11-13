@@ -761,7 +761,7 @@ mod tests {
             headers("key"),
             [
                 ("X-API-Key", "key"),
-                ("X-App-Version", "0.2.0"),
+                ("X-App-Version", env!("CARGO_PKG_VERSION")),
                 ("Content-Type", "application/json"),
             ]
         );
