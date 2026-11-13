@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_TEXT_SIZE: f32 = 18.0;
 const NAME_TEXT_SIZE: f32 = 13.0;
+const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest");
 const LOGO_SIZE: f32 = 18.0;
 const LIVE_DOT_RADIUS: f32 = 3.0;
 const ACTIVE_DOT_RADIUS: f32 = 4.0;
@@ -694,7 +695,7 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits) {
     ui.add_space(6.0);
     ui.columns(windows.len(), |columns| {
         for (column, (label, window)) in columns.iter_mut().zip(windows) {
-            plan_limit_meter(column, label, window, now);
+            plan_limit_meter(column, &label, window, now);
         }
     });
 }
@@ -875,16 +876,30 @@ fn sync_label(ui: &mut Ui, status: &SyncStatus) -> bool {
     if *status == SyncStatus::KeyRejected {
         text = text.color(RED);
     }
-    if matches!(
+    let update = matches!(
         status,
         SyncStatus::Synced {
             update: Some(_),
             ..
         }
-    ) {
+    );
+    if update {
         text = text.color(theme::AMBER);
     }
     let label = theme::pill(ui).show(ui, |ui| ui.label(text)).inner;
+    if update {
+        let label = label
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let label = match hover {
+            Some(hover) => label.on_hover_text(hover),
+            None => label,
+        };
+        if label.clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(RELEASES_URL));
+        }
+        return false;
+    }
     if key_problem(status).is_some() {
         return label
             .interact(egui::Sense::click())
@@ -920,7 +935,7 @@ fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
             if let Some(version) = update {
                 text = format!("{text} · v{version} available");
                 hover.push(format!(
-                    "Your team already runs v{version}, this app is v{APP_VERSION}. Update it."
+                    "Your team already runs v{version}, this app is v{APP_VERSION}. Click to download the update."
                 ));
             }
             (text, (!hover.is_empty()).then(|| hover.join("\n")))
@@ -1180,7 +1195,7 @@ s2: numbers must be >= 0"
             (
                 "Synced 08:45 · v9.0.0 available".to_owned(),
                 Some(format!(
-                    "Your team already runs v9.0.0, this app is v{APP_VERSION}. Update it."
+                    "Your team already runs v9.0.0, this app is v{APP_VERSION}. Click to download the update."
                 ))
             )
         );

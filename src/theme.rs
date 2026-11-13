@@ -1,3 +1,4 @@
+use eframe::egui;
 use eframe::egui::epaint::{RectShape, TessellationOptions, Tessellator};
 use eframe::egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
 use eframe::egui::{
@@ -21,7 +22,8 @@ const GLASS_RADIUS: u8 = 14;
 const WINDOW_RADIUS: u8 = 16;
 const WIDGET_RADIUS: u8 = 10;
 const PILL_RADIUS: u8 = 20;
-const LOGO_RADIUS: f32 = 5.0;
+const LOGO_PIXELS: u32 = 64;
+const LOGO_TEXTURE: &str = "app_logo";
 const BODY_SIZE: f32 = 12.0;
 const SMALL_SIZE: f32 = 10.0;
 const HEADING_SIZE: f32 = 14.0;
@@ -498,8 +500,24 @@ pub fn level_color(fraction: f32) -> Option<Color32> {
 }
 
 pub fn logo(ui: &mut Ui, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    gradient_fill(ui.painter(), rect, LOGO_RADIUS, ACCENT, VIOLET);
+    let id = egui::Id::unique(LOGO_TEXTURE);
+    let texture = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(id))
+        .unwrap_or_else(|| {
+            let side = LOGO_PIXELS as usize;
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [side, side],
+                &crate::icon::rgba(LOGO_PIXELS),
+            );
+            let texture = ui
+                .ctx()
+                .load_texture(LOGO_TEXTURE, image, egui::TextureOptions::LINEAR);
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(id, texture.clone()));
+            texture
+        });
+    ui.add(egui::Image::new((texture.id(), Vec2::splat(size))));
 }
 
 pub fn gradient_bar(ui: &mut Ui, fraction: f32, size: Vec2) -> Response {

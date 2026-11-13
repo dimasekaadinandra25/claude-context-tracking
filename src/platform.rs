@@ -107,6 +107,29 @@ pub fn crash_log() -> PathBuf {
     data_dir().join("crash.log")
 }
 
+pub fn app_log() -> PathBuf {
+    data_dir().join("app.log")
+}
+
+pub fn running_marker() -> PathBuf {
+    data_dir().join("running")
+}
+
+#[cfg(windows)]
+pub fn booted_at() -> Option<std::time::SystemTime> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    let uptime = std::time::Duration::from_millis(unsafe { GetTickCount64() });
+    std::time::SystemTime::now().checked_sub(uptime)
+}
+
+#[cfg(not(windows))]
+pub fn booted_at() -> Option<std::time::SystemTime> {
+    None
+}
+
 pub fn instance_lock_file() -> PathBuf {
     data_dir().join("instance.lock")
 }

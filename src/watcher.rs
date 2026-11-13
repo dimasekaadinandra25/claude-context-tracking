@@ -1,6 +1,7 @@
 use crate::cache;
 use crate::export::{to_tsv, write_atomic};
 use crate::index::Index;
+use crate::lifecycle::{self, Heartbeat};
 use crate::plan_limits::UsagePoller;
 use crate::platform;
 use crate::session::Session;
@@ -34,9 +35,11 @@ pub fn spawn(ctx: egui::Context, tx: Sender<Update>) -> Sender<Command> {
 pub fn quit(commands: &Sender<Command>) {
     std::thread::spawn(|| {
         std::thread::sleep(QUIT_TIMEOUT);
+        lifecycle::quit("from the tray before the last sync finished");
         std::process::exit(0);
     });
     if commands.send(Command::Quit).is_err() {
+        lifecycle::quit("from the tray");
         std::process::exit(0);
     }
 }
@@ -56,6 +59,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
     let mut exporter = Exporter::new(machine.clone());
     let mut syncer = Syncer::new();
     let mut usage = UsagePoller::default();
+    let mut heartbeat = Heartbeat::default();
     let mut changed = true;
     loop {
         if changed {
@@ -66,6 +70,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
         }
         exporter.tick(&index);
         usage.tick();
+        heartbeat.tick();
         cache.tick(&index);
         let (sync_tx, sync_ctx) = (tx.clone(), ctx.clone());
         syncer.tick(&index, &machine, move |status| {
@@ -78,6 +83,7 @@ fn run(ctx: &egui::Context, tx: &Sender<Update>, commands: &Receiver<Command>) {
                 cache.mark(index.scan(&root, |_, _| {}));
                 cache.flush(&index);
                 syncer.finish(&index, &machine);
+                lifecycle::quit("from the tray");
                 std::process::exit(0);
             }
             Err(RecvTimeoutError::Timeout) => {}

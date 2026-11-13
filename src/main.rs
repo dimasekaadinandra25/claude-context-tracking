@@ -10,6 +10,7 @@ mod details;
 mod export;
 mod icon;
 mod index;
+mod lifecycle;
 mod mini;
 mod models;
 mod overhead;
@@ -48,6 +49,7 @@ fn main() -> eframe::Result {
     let _ = autostart::upgrade();
     let _ = plan_limits::keep_path_current();
     let hidden = autostart::launched_hidden(std::env::args());
+    lifecycle::started(hidden);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(theme::WINDOW_SIZE)
@@ -84,6 +86,7 @@ fn install_crash_log() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        lifecycle::log(&format!("crashed: {info}"));
         let report = format!("{info}\n{}\n", std::backtrace::Backtrace::force_capture());
         let _ = std::fs::OpenOptions::new()
             .create(true)

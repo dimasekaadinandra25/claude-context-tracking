@@ -53,8 +53,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let path = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("app.ico");
-    std::fs::write(&path, ico()).expect("write app.ico");
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let path = out.join("app.ico");
+    let icon = ico();
+    std::fs::write(&path, &icon).expect("write app.ico");
+    if let Some(profile_dir) = out.ancestors().nth(3) {
+        let _ = std::fs::write(profile_dir.join("app.ico"), &icon);
+    }
     let mut resource = winresource::WindowsResource::new();
     resource.set_icon(&path.to_string_lossy());
     resource.compile().expect("embed the app icon");

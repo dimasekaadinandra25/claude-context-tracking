@@ -23,7 +23,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 - Optional **Start with Windows** (in ⚙ Settings); started that way it stays hidden in the tray
 - Exports a tab-separated snapshot to `usage.txt` every 30 minutes (only when something changed)
 - Optionally syncs usage to a team server every 30 minutes, on demand with **Sync now**, and once more on **Quit**
-- Shows your Claude plan's 5-hour and 7-day limits. Every 5 minutes it asks Anthropic's usage endpoint (the one `/usage` shows) with Claude Code's own sign-in from `~/.claude/.credentials.json`, so it works when you only use the VS Code panel. The token is only sent to Anthropic, never refreshed (an expired one is skipped until Claude Code renews it) and never sent to the team server. Running `claude` in a terminal also reports the limits through the status line
+- Shows your Claude plan's 5-hour and 7-day limits, plus any weekly limit Claude sets for a single model (such as Fable) as its own meter. Every 5 minutes it asks Anthropic's usage endpoint (the one `/usage` shows) with Claude Code's own sign-in from `~/.claude/.credentials.json`, so it works when you only use the VS Code panel. The token is only sent to Anthropic, never refreshed (an expired one is skipped until Claude Code renews it) and never sent to the team server. Running `claude` in a terminal also reports the limits through the status line
 - Windows installer (Inno Setup) built by CI
 - Runs on Windows, macOS and Linux
 
@@ -67,6 +67,8 @@ The binary is self-contained. Copy it anywhere and run it; Rust is only needed t
 ### Prebuilt binaries (GitHub Actions)
 
 Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml), which tests and builds the app on Windows, macOS and Linux. Download the binaries from the run's **Artifacts** section on the repository's **Actions** tab. You can also start a build manually there with **Run workflow**.
+
+To publish a release, bump `version` in `Cargo.toml`, commit, then push a matching tag (`git tag v0.3.0 && git push origin v0.3.0`). The workflow then creates a GitHub Release with the Windows installer and the Windows, macOS and Linux binaries attached. The release job fails if the tag and `Cargo.toml` disagree. When a teammate already runs a newer version, the app's bottom bar shows `· vX available`; clicking it opens the latest release.
 
 ### Windows installer
 
@@ -200,7 +202,7 @@ MY-LAPTOP	RAG system with pgvector in Go	claude-opus-5-5	50.0K	90.0K / 1M (9%)	+
 
 Text editors such as Notepad don't reload a file that changes while it is open; reopen it to see a new snapshot.
 
-If the app ever crashes, details are appended to `crash.log` in the same folder.
+If the app ever crashes, details are appended to `crash.log` in the same folder. `app.log` there records every start and every **Quit**, and the app marks itself alive every 5 minutes. When a run ends any other way, the next start writes when it was last alive and the likely cause: a crash, Windows shutting down or restarting, or the process being ended without **Quit** (Task Manager, an installer, signing out).
 
 ### Sync to a usage server
 

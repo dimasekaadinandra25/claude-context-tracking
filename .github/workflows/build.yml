@@ -43,3 +43,29 @@ jobs:
           name: claude-usage-monitor-setup
           path: target/installer/claude-usage-monitor-setup-*.exe
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir out
+          cp dist/claude-usage-monitor-setup/*.exe out/
+          cp dist/claude-usage-monitor-Windows/claude-usage-monitor.exe out/claude-usage-monitor-windows.exe
+          cp dist/claude-usage-monitor-macOS/claude-usage-monitor out/claude-usage-monitor-macos
+          cp dist/claude-usage-monitor-Linux/claude-usage-monitor out/claude-usage-monitor-linux
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Claude Usage Monitor $GITHUB_REF_NAME" --generate-notes

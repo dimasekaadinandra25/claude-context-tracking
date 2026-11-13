@@ -51,12 +51,22 @@ pub struct PlanLimits {
 }
 
 impl PlanLimits {
-    pub fn live(&self, now: u64) -> Vec<(&'static str, Window)> {
+    pub fn live(&self, now: u64) -> Vec<(String, Window)> {
+        let models = self.models.iter().map(|model| {
+            (
+                model.name.clone(),
+                Some(Window {
+                    used_percentage: model.used_percentage,
+                    resets_at: model.resets_at,
+                }),
+            )
+        });
         [
-            (FIVE_HOUR_LABEL, self.five_hour),
-            (SEVEN_DAY_LABEL, self.seven_day),
+            (FIVE_HOUR_LABEL.to_owned(), self.five_hour),
+            (SEVEN_DAY_LABEL.to_owned(), self.seven_day),
         ]
         .into_iter()
+        .chain(models)
         .filter_map(|(label, window)| Some((label, window?)))
         .filter(|(_, window)| window.resets_at > now)
         .collect()
@@ -574,13 +584,23 @@ mod tests {
                 used_percentage: 20.0,
                 resets_at: 300,
             }),
-            models: Vec::new(),
+            models: vec![ModelLimit {
+                name: "Fable".into(),
+                used_percentage: 4.0,
+                resets_at: 300,
+            }],
             captured_at: 50,
         };
-        assert_eq!(limits.live(50).len(), 2);
+        assert_eq!(limits.live(50).len(), 3);
         let later = limits.live(200);
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].0, "7d");
+        assert_eq!(
+            later
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["7d", "Fable"]
+        );
+        assert!(limits.live(400).is_empty());
     }
 
     #[test]
