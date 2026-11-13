@@ -1,10 +1,10 @@
-use crate::alerts::{self, FullWarnings};
+use crate::alerts::{self, FullWarnings, LimitWarnings};
 use crate::config;
 use crate::details;
 use crate::mini;
 use crate::models;
 use crate::overhead::{self, Overhead};
-use crate::plan_limits::{self, FIVE_HOUR_LABEL, PlanLimits, Window};
+use crate::plan_limits::{self, FIVE_HOUR_LABEL, PlanLimits, SEVEN_DAY_LABEL, Window};
 use crate::platform::{self, APP_NAME, APP_VERSION};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ACTIVE_TEXT_SIZE: f32 = 18.0;
 const NAME_TEXT_SIZE: f32 = 13.0;
-const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest");
 const LOGO_SIZE: f32 = 18.0;
 const LIVE_DOT_RADIUS: f32 = 3.0;
 const ACTIVE_DOT_RADIUS: f32 = 4.0;
@@ -78,6 +77,7 @@ pub struct App {
     overheads_refreshed: Option<Instant>,
     plan_limits: Option<PlanLimits>,
     plan_limits_refreshed: Option<Instant>,
+    limit_warnings: LimitWarnings,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -125,6 +125,7 @@ impl App {
             overheads_refreshed: None,
             plan_limits: None,
             plan_limits_refreshed: None,
+            limit_warnings: LimitWarnings::default(),
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -271,6 +272,14 @@ impl App {
         {
             self.plan_limits = plan_limits::load();
             self.plan_limits_refreshed = Some(Instant::now());
+            if let Some(limits) = &self.plan_limits {
+                let now = plan_limits::unix_now();
+                for (label, window) in self.limit_warnings.newly_crossed(&limits.live(now)) {
+                    let left =
+                        format_age(Duration::from_secs(window.resets_at.saturating_sub(now)));
+                    alerts::notify_limit(&limit_name(&label), window, &left);
+                }
+            }
         }
     }
 
@@ -686,6 +695,14 @@ impl eframe::App for App {
     }
 }
 
+fn limit_name(label: &str) -> String {
+    match label {
+        FIVE_HOUR_LABEL => "Your 5-hour Claude limit".to_owned(),
+        SEVEN_DAY_LABEL => "Your weekly Claude limit".to_owned(),
+        model => format!("Your weekly {model} limit"),
+    }
+}
+
 fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits) {
     let now = plan_limits::unix_now();
     let windows = limits.live(now);
@@ -905,7 +922,7 @@ fn sync_label(ui: &mut Ui, status: &SyncStatus) -> bool {
             None => label,
         };
         if label.clicked() {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(RELEASES_URL));
+            crate::update::start(ui.ctx().clone());
         }
         return false;
     }
@@ -944,7 +961,7 @@ fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
             if let Some(version) = update {
                 text = format!("{text} · v{version} available");
                 hover.push(format!(
-                    "Your team already runs v{version}, this app is v{APP_VERSION}. Click to download the update."
+                    "Your team already runs v{version}, this app is v{APP_VERSION}. Click to install the update."
                 ));
             }
             (text, (!hover.is_empty()).then(|| hover.join("\n")))
@@ -1204,7 +1221,7 @@ s2: numbers must be >= 0"
             (
                 "Synced 08:45 · v9.0.0 available".to_owned(),
                 Some(format!(
-                    "Your team already runs v9.0.0, this app is v{APP_VERSION}. Click to download the update."
+                    "Your team already runs v9.0.0, this app is v{APP_VERSION}. Click to install the update."
                 ))
             )
         );

@@ -1,9 +1,12 @@
+use crate::plan_limits::Window;
 use crate::platform::APP_NAME;
 use crate::session::{Session, format_tokens, unix_seconds};
 use crate::theme::{FULL_AT, WARN_AT};
 use std::collections::HashSet;
 
 const DAY_SECONDS: i64 = 86_400;
+const LIMIT_STEPS: [f64; 2] = [80.0, 90.0];
+const HOUR_SECONDS: u64 = 3_600;
 
 pub fn day_start(now: u64, utc_offset: i64) -> u64 {
     let local = i64::try_from(now).unwrap_or_default() + utc_offset;
@@ -58,6 +61,43 @@ pub fn notify_full(session: &Session) {
     notify("Context almost full", body);
 }
 
+#[derive(Default)]
+pub struct LimitWarnings {
+    seen: HashSet<(String, u64, u8)>,
+    primed: bool,
+}
+
+impl LimitWarnings {
+    pub fn newly_crossed(&mut self, windows: &[(String, Window)]) -> Vec<(String, Window)> {
+        let mut fresh = Vec::new();
+        for (label, window) in windows {
+            let mut crossed = false;
+            for step in LIMIT_STEPS
+                .iter()
+                .filter(|step| window.used_percentage >= **step)
+            {
+                let key = (label.clone(), window.resets_at / HOUR_SECONDS, *step as u8);
+                crossed |= self.seen.insert(key);
+            }
+            if crossed && self.primed {
+                fresh.push((label.clone(), *window));
+            }
+        }
+        self.primed = true;
+        fresh
+    }
+}
+
+pub fn notify_limit(name: &str, window: Window, resets_in: &str) {
+    notify(
+        "Claude limit almost used",
+        format!(
+            "{name} is {:.0}% used. It resets in {resets_in}.",
+            window.used_percentage
+        ),
+    );
+}
+
 pub fn notify_key_reminder() {
     notify(
         "Usage sync is off",
@@ -87,6 +127,41 @@ mod tests {
             context_window: 1_000,
             ..Session::default()
         }
+    }
+
+    #[test]
+    fn limit_warnings_fire_once_per_step_and_skip_what_was_already_crossed() {
+        let window = |used| Window {
+            used_percentage: used,
+            resets_at: 1_000_000,
+        };
+        let mut warnings = LimitWarnings::default();
+        assert!(
+            warnings
+                .newly_crossed(&[("7d".into(), window(85.0))])
+                .is_empty()
+        );
+        assert!(
+            warnings
+                .newly_crossed(&[("7d".into(), window(86.0))])
+                .is_empty()
+        );
+        let ninety =
+            warnings.newly_crossed(&[("7d".into(), window(91.0)), ("Fable".into(), window(10.0))]);
+        assert_eq!(ninety.len(), 1);
+        assert_eq!(ninety[0].0, "7d");
+        assert!(
+            warnings
+                .newly_crossed(&[("7d".into(), window(95.0))])
+                .is_empty()
+        );
+        let fable = warnings.newly_crossed(&[("Fable".into(), window(80.0))]);
+        assert_eq!(fable.len(), 1);
+        let next_week = Window {
+            used_percentage: 82.0,
+            resets_at: 1_000_000 + 7 * 86_400,
+        };
+        assert_eq!(warnings.newly_crossed(&[("7d".into(), next_week)]).len(), 1);
     }
 
     #[test]

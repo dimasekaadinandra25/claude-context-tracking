@@ -180,16 +180,10 @@ struct IngestResult {
     latest_app_version: Option<String>,
 }
 
-type PlanReading = Option<Vec<Option<f64>>>;
+type PlanReading = Option<u64>;
 
 fn plan_reading() -> PlanReading {
-    plan_limits::load().map(|limits| {
-        [limits.five_hour, limits.seven_day]
-            .map(|window| window.map(|w| w.used_percentage))
-            .into_iter()
-            .chain(limits.models.iter().map(|m| Some(m.used_percentage)))
-            .collect()
-    })
+    plan_limits::load().map(|limits| limits.captured_at)
 }
 
 fn version_parts(version: &str) -> Vec<u64> {
@@ -360,7 +354,11 @@ fn run_with(
     let mut rejected = Vec::new();
     let mut latest = None;
     let mut overheads = HashMap::new();
-    for chunk in chunks(sessions, config::load_watermark(config).as_deref()) {
+    let mut batches = chunks(sessions, config::load_watermark(config).as_deref());
+    if batches.is_empty() {
+        batches.push(Vec::new());
+    }
+    for chunk in batches {
         for session in &chunk {
             overheads
                 .entry(session.project.clone())
@@ -379,8 +377,9 @@ fn run_with(
             }
             Err(status) => return status,
         }
-        let newest = chunk.last().map_or("", |s| s.last_activity());
-        if let Err(error) = config::save_watermark(config, newest) {
+        if let Some(newest) = chunk.last().map(|s| s.last_activity())
+            && let Err(error) = config::save_watermark(config, newest)
+        {
             return SyncStatus::Failed(error.to_string());
         }
     }
@@ -857,6 +856,33 @@ mod tests {
         assert_eq!(
             config::load_watermark(&enabled()).as_deref(),
             Some("2026-10-30T02:00:00.249Z")
+        );
+    }
+
+    #[test]
+    fn limits_are_sent_even_when_no_session_changed() {
+        let _env = lock_env();
+        let dir = TempDir::new("sync-limits-only");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        config::save_watermark(&enabled(), "2099-01-01T00:00:00Z").unwrap();
+        let sessions = [session_with_hours(0, 1, 1)];
+        let mut bodies = Vec::new();
+        let status = run_with(
+            |_, _, body| {
+                bodies.push(body.to_owned());
+                Ok(String::new())
+            },
+            |_| Overhead::default(),
+            &enabled(),
+            &sessions,
+            "PC",
+        );
+        assert!(matches!(status, SyncStatus::Synced { .. }));
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains(r#""sessions":[]"#), "{}", bodies[0]);
+        assert_eq!(
+            config::load_watermark(&enabled()).as_deref(),
+            Some("2099-01-01T00:00:00Z")
         );
     }
 
