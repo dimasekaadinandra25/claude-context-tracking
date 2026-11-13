@@ -33,7 +33,7 @@ jobs:
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $icon = Get-ChildItem target -Recurse -Filter app.ico | Select-Object -First 1 -ExpandProperty FullName
+          $icon = Get-ChildItem target\release -Recurse -Filter app.ico | Select-Object -First 1 -ExpandProperty FullName
           Write-Host "installer icon: $icon"
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           $defines = @("/DAppVersion=$version")

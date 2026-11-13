@@ -57,7 +57,11 @@ fn main() {
     let path = out.join("app.ico");
     let icon = ico();
     std::fs::write(&path, &icon).expect("write app.ico");
-    if let Some(profile_dir) = out.ancestors().nth(3) {
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    if let Some(profile_dir) = out
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == profile.as_str()))
+    {
         let _ = std::fs::write(profile_dir.join("app.ico"), &icon);
     }
     let mut resource = winresource::WindowsResource::new();
