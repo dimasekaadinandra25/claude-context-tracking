@@ -77,7 +77,7 @@ The Windows job also builds `claude-usage-monitor-setup-<version>.exe` (artifact
 To build it locally after `cargo build --release`:
 
 ```sh
-iscc /DAppVersion=0.3.0 installer\claude-usage-monitor.iss
+iscc /DAppVersion=0.3.0 /DAppIcon=%CD%\target\release\app.ico installer\claude-usage-monitor.iss
 ```
 
 The setup file lands in `target\installer\`.

@@ -15,7 +15,9 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
-SetupIconFile={#SourcePath}..\target\release\app.ico
+#ifdef AppIcon
+SetupIconFile={#AppIcon}
+#endif
 OutputDir=..\target\installer
 OutputBaseFilename=claude-usage-monitor-setup-{#AppVersion}
 Compression=lzma2

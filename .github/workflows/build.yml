@@ -33,9 +33,12 @@ jobs:
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (-not (Test-Path target\release\app.ico)) { Get-ChildItem target\release -Recurse -Filter app.ico | Select-Object FullName; throw 'target\release\app.ico was not written by build.rs' }
+          $icon = Get-ChildItem target -Recurse -Filter app.ico | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "installer icon: $icon"
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" installer\claude-usage-monitor.iss
+          $defines = @("/DAppVersion=$version")
+          if ($icon) { $defines += "/DAppIcon=$icon" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @defines installer\claude-usage-monitor.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - if: runner.os == 'Windows'
