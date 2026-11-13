@@ -4,7 +4,7 @@ use crate::details;
 use crate::mini;
 use crate::models;
 use crate::overhead::{self, Overhead};
-use crate::plan_limits::{self, PlanLimits, Window};
+use crate::plan_limits::{self, FIVE_HOUR_LABEL, PlanLimits, Window};
 use crate::platform::{self, APP_NAME, APP_VERSION};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
@@ -722,8 +722,17 @@ fn plan_limit_meter(ui: &mut Ui, label: &str, window: Window, now: u64) {
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.label(name);
+            let mut hover = format!("{percent} used, resets in {left}");
+            if label != FIVE_HOUR_LABEL
+                && let Some(budget) = window.weekly_budget(now)
+            {
+                hover = format!(
+                    "{hover}
+{budget}"
+                );
+            }
             theme::gradient_bar(ui, fraction, vec2(bar, PLAN_LIMIT_BAR_HEIGHT))
-                .on_hover_text(format!("{percent} used, resets in {left}"));
+                .on_hover_text(hover);
             ui.label(value);
             if show_remaining {
                 ui.label(remaining);

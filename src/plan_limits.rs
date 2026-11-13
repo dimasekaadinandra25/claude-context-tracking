@@ -17,7 +17,7 @@ const STATUS_LINE_KEY: &str = "statusLine";
 const COMMAND_KEY: &str = "command";
 const TYPE_KEY: &str = "type";
 const COMMAND_TYPE: &str = "command";
-const FIVE_HOUR_LABEL: &str = "5h";
+pub const FIVE_HOUR_LABEL: &str = "5h";
 const SEVEN_DAY_LABEL: &str = "7d";
 const ACCOUNT_FILE: &str = ".claude.json";
 const CREDENTIALS_FILE: &str = ".credentials.json";
@@ -48,6 +48,31 @@ pub struct PlanLimits {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelLimit>,
     pub captured_at: u64,
+}
+
+const DAY_SECONDS: f64 = 86_400.0;
+const WEEK_SECONDS: f64 = 7.0 * DAY_SECONDS;
+const FULL_PERCENT: f64 = 100.0;
+
+impl Window {
+    pub fn weekly_budget(&self, now: u64) -> Option<String> {
+        let left = self.resets_at.checked_sub(now)? as f64;
+        if left <= 0.0 || left > WEEK_SECONDS {
+            return None;
+        }
+        let days = left / DAY_SECONDS;
+        let remaining = (FULL_PERCENT - self.used_percentage).max(0.0);
+        let mut text = format!(
+            "budget {:.1}%/day for {days:.1} days",
+            remaining / days.max(1.0)
+        );
+        let elapsed = WEEK_SECONDS - left;
+        if elapsed >= DAY_SECONDS {
+            let projected = self.used_percentage / elapsed * WEEK_SECONDS;
+            text.push_str(&format!(", on pace for {projected:.0}% at reset"));
+        }
+        Some(text)
+    }
 }
 
 impl PlanLimits {
@@ -484,6 +509,24 @@ mod tests {
     use crate::platform::{TempDir, lock_env};
 
     const OURS: &str = "\"C:/Apps/claude-usage-monitor.exe\" --statusline";
+
+    #[test]
+    fn weekly_budget_spreads_what_is_left_and_projects_the_pace() {
+        let day: u64 = 86_400;
+        let window = |used, days_left| Window {
+            used_percentage: used,
+            resets_at: 1_000_000 + days_left * day,
+        };
+        assert_eq!(
+            window(20.0, 5).weekly_budget(1_000_000).as_deref(),
+            Some("budget 16.0%/day for 5.0 days, on pace for 70% at reset")
+        );
+        assert_eq!(
+            window(5.0, 7).weekly_budget(1_000_000).as_deref(),
+            Some("budget 13.6%/day for 7.0 days")
+        );
+        assert_eq!(window(5.0, 0).weekly_budget(1_000_000), None);
+    }
 
     #[test]
     fn usage_endpoint_reply_becomes_plan_limits() {
