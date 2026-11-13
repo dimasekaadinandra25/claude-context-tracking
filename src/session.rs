@@ -33,7 +33,16 @@ pub struct HourUsage {
     pub cache_read_tokens: u64,
 }
 
+pub const OUTPUT_WEIGHT: u64 = 5;
+
 impl HourUsage {
+    pub fn weight(&self) -> u64 {
+        self.input_tokens
+            + self.cache_write_tokens
+            + self.cache_read_tokens
+            + OUTPUT_WEIGHT * (self.output_tokens + self.subagent_output_tokens)
+    }
+
     fn add_billed(&mut self, usage: &RequestUsage) {
         self.input_tokens += usage.input_tokens;
         self.cache_write_tokens += usage.cache_creation_input_tokens;
@@ -83,6 +92,18 @@ impl Session {
             id,
             ..Self::default()
         }
+    }
+
+    pub fn weight(&self) -> u64 {
+        self.hours.values().map(HourUsage::weight).sum()
+    }
+
+    pub fn hour_weights(&self) -> BTreeMap<&str, u64> {
+        let mut weights = BTreeMap::new();
+        for ((hour, _), usage) in &self.hours {
+            *weights.entry(hour.as_str()).or_default() += usage.weight();
+        }
+        weights
     }
 
     pub fn name(&self) -> &str {

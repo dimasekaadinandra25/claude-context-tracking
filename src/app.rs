@@ -1,4 +1,4 @@
-use crate::alerts::{self, FullWarnings, LimitWarnings};
+use crate::alerts::{self, FullWarnings, LimitWarnings, RunawayWarnings};
 use crate::config;
 use crate::details;
 use crate::mini;
@@ -32,6 +32,8 @@ const INFO_RADIUS: f32 = 6.0;
 const IDLE_VALUE_WIDTH: f32 = 52.0;
 const IDLE_CONTEXT_WIDTH: f32 = 80.0;
 const IDLE_MODEL_WIDTH: f32 = 88.0;
+const IDLE_COST_WIDTH: f32 = 56.0;
+const COST_HINT: &str = "Estimated plan cost of this session at this week's rate";
 const IDLE_NAME_MIN_WIDTH: f32 = 140.0;
 const MAX_CONTENT_WIDTH: f32 = 760.0;
 const SUMMARY_SEPARATOR: &str = "  ·  ";
@@ -79,6 +81,9 @@ pub struct App {
     plan_limits_refreshed: Option<Instant>,
     limit_warnings: LimitWarnings,
     cost_rate: Option<f64>,
+    percent_rate: Option<f64>,
+    runaway: RunawayWarnings,
+    today_budget: Option<(f64, f64)>,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -92,6 +97,7 @@ pub struct App {
 enum IdleSort {
     Recent,
     Largest,
+    Cost,
 }
 
 impl App {
@@ -128,6 +134,9 @@ impl App {
             plan_limits_refreshed: None,
             limit_warnings: LimitWarnings::default(),
             cost_rate: None,
+            percent_rate: None,
+            runaway: RunawayWarnings::default(),
+            today_budget: None,
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -157,11 +166,9 @@ impl App {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
                 Update::Sync(status) => {
-                    if let SyncStatus::Synced {
-                        rate: Some(rate), ..
-                    } = &status
-                    {
-                        self.cost_rate = Some(*rate);
+                    if let SyncStatus::Synced { rate, percent, .. } = &status {
+                        self.cost_rate = rate.or(self.cost_rate);
+                        self.percent_rate = percent.or(self.percent_rate);
                     }
                     self.sync = status;
                 }
@@ -201,6 +208,14 @@ impl App {
         let active: Vec<&Session> = self.sessions.iter().filter(|s| s.is_active(now)).collect();
         for session in self.warnings.newly_full(active.iter().copied()) {
             alerts::notify_full(session);
+        }
+        if let Some(rate) = self.percent_rate {
+            for (session, share) in
+                self.runaway
+                    .newly_hot(&self.sessions, rate, plan_limits::unix_now())
+            {
+                alerts::notify_runaway(session, share);
+            }
         }
         let Some(tray) = &self.tray else {
             return;
@@ -270,7 +285,7 @@ impl App {
             self.settings = Some(Settings::load());
         }
         if let Some(limits) = &self.plan_limits {
-            plan_limits_row(ui, limits);
+            plan_limits_row(ui, limits, self.today_budget);
         }
         ui.add_space(6.0);
     }
@@ -282,6 +297,7 @@ impl App {
         {
             self.plan_limits = plan_limits::load();
             self.plan_limits_refreshed = Some(Instant::now());
+            self.today_budget = None;
             if let Some(limits) = &self.plan_limits {
                 let now = plan_limits::unix_now();
                 if let Some(window) = limits.seven_day.filter(|w| w.resets_at > now) {
@@ -291,6 +307,8 @@ impl App {
                     if saved.as_ref() != Some(&state) {
                         crate::budget::save(&state);
                     }
+                    self.today_budget =
+                        Some((window.used_percentage - state.start_used, state.budget));
                     if let Some(over) = over {
                         alerts::notify_over_budget(&over);
                     }
@@ -450,8 +468,10 @@ impl App {
             empty_state(ui, "No sessions match your search", "Esc clears the search");
             return None;
         }
-        if *sort == IdleSort::Largest {
-            idle.sort_by_key(|s| std::cmp::Reverse(s.latest_context));
+        match sort {
+            IdleSort::Largest => idle.sort_by_key(|s| std::cmp::Reverse(s.latest_context)),
+            IdleSort::Cost => idle.sort_by_key(|s| std::cmp::Reverse(s.weight())),
+            IdleSort::Recent => {}
         }
         let (recent, older): (Vec<_>, Vec<_>) = idle
             .into_iter()
@@ -471,7 +491,7 @@ impl App {
                 return;
             }
             ui.add_space(CARD_SPACING);
-            idle_header(ui, sort);
+            idle_header(ui, sort, self.cost_rate.is_some());
             theme::glass(ui)
                 .inner_margin(egui::Margin::symmetric(0, IDLE_PANEL_MARGIN))
                 .show(ui, |ui| {
@@ -583,7 +603,7 @@ impl App {
                 let (_, info) = split_row(
                     ui,
                     ROW_HEIGHT,
-                    |ui| summary_label(ui, session, reserve),
+                    |ui| summary_label(ui, session, self.cost(session), reserve),
                     |ui| {
                         let info = self.info_button(ui, session);
                         ui.label(latest);
@@ -598,7 +618,9 @@ impl App {
     fn idle_row(&self, ui: &mut Ui, session: &Session, now: SystemTime) -> bool {
         idle_frame()
             .show(ui, |ui| {
-                let columns = idle_columns(ui.available_width(), ui.spacing().item_spacing.x);
+                let with_cost = self.cost_rate.is_some();
+                let mut columns =
+                    idle_columns(ui.available_width(), ui.spacing().item_spacing.x, with_cost);
                 split_row(
                     ui,
                     ROW_HEIGHT,
@@ -611,6 +633,12 @@ impl App {
                         fixed_width_label(ui, IDLE_VALUE_WIDTH, RichText::new(age).small().weak());
                         fixed_width_label(ui, IDLE_VALUE_WIDTH, idle_new_context(session))
                             .on_hover_text(NEW_CONTEXT_HINT);
+                        if with_cost && columns > 0 {
+                            let cost = self.cost(session).map(dollars).unwrap_or_default();
+                            fixed_width_label(ui, IDLE_COST_WIDTH, RichText::new(cost).small())
+                                .on_hover_text(COST_HINT);
+                            columns -= 1;
+                        }
                         if columns > 0 {
                             fixed_width_label(
                                 ui,
@@ -632,6 +660,11 @@ impl App {
                 .0
             })
             .inner
+    }
+
+    fn cost(&self, session: &Session) -> Option<f64> {
+        self.cost_rate
+            .and_then(|rate| details::estimated_cost(session, rate))
     }
 
     fn context_bar(&self, ui: &mut Ui, session: &Session, size: egui::Vec2) -> bool {
@@ -724,7 +757,7 @@ fn limit_name(label: &str) -> String {
     }
 }
 
-fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits) {
+fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<(f64, f64)>) {
     let now = plan_limits::unix_now();
     let windows = limits.live(now);
     if windows.is_empty() {
@@ -736,6 +769,25 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits) {
             plan_limit_meter(column, &label, window, now);
         }
     });
+    if let Some((used, budget)) = today {
+        let text = RichText::new(today_text(used, budget)).small();
+        ui.label(if used > budget {
+            text.color(RED)
+        } else {
+            text.weak()
+        });
+    }
+}
+
+fn today_text(used: f64, budget: f64) -> String {
+    format!(
+        "Today {:.1}% of the weekly limit used · budget {budget:.1}%",
+        used.max(0.0)
+    )
+}
+
+fn dollars(cost: f64) -> String {
+    format!("${cost:.2}")
 }
 
 fn plan_limit_meter(ui: &mut Ui, label: &str, window: Window, now: u64) {
@@ -1023,7 +1075,7 @@ fn idle_frame() -> egui::Frame {
     egui::Frame::new().inner_margin(egui::Margin::symmetric(IDLE_INSET, 2))
 }
 
-fn idle_header(ui: &mut Ui, sort: &mut IdleSort) {
+fn idle_header(ui: &mut Ui, sort: &mut IdleSort, with_cost: bool) {
     idle_frame().show(ui, |ui| {
         split_row(
             ui,
@@ -1031,6 +1083,10 @@ fn idle_header(ui: &mut Ui, sort: &mut IdleSort) {
             |ui| {
                 ui.selectable_value(sort, IdleSort::Largest, RichText::new("Largest").small());
                 ui.selectable_value(sort, IdleSort::Recent, RichText::new("Recent").small());
+                if with_cost {
+                    ui.selectable_value(sort, IdleSort::Cost, RichText::new("Cost").small())
+                        .on_hover_text(COST_HINT);
+                }
             },
             |ui| ui.label(RichText::new("IDLE").small().weak()),
         );
@@ -1052,8 +1108,8 @@ fn name_label(ui: &mut Ui, session: &Session, text: RichText) {
         .on_hover_text(format!("{}\n{}", session.project, session.id));
 }
 
-fn summary_label(ui: &mut Ui, session: &Session, reserve: f32) {
-    let parts = summary_parts(session);
+fn summary_label(ui: &mut Ui, session: &Session, cost: Option<f64>, reserve: f32) {
+    let parts = summary_parts(session, cost);
     let widths: Vec<f32> = parts
         .iter()
         .map(|part| text_width(ui, RichText::new(part).small()))
@@ -1069,11 +1125,14 @@ fn summary_label(ui: &mut Ui, session: &Session, reserve: f32) {
     });
 }
 
-fn summary_parts(session: &Session) -> Vec<String> {
+fn summary_parts(session: &Session, cost: Option<f64>) -> Vec<String> {
     let mut parts = vec![
         session.model.clone(),
         format!("started at {}", format_tokens(session.start_context)),
     ];
+    if let Some(cost) = cost {
+        parts.push(format!("≈ {} so far", dollars(cost)));
+    }
     if session.compactions > 0 {
         parts.push(format!("compacted {}×", session.compactions));
     }
@@ -1103,9 +1162,14 @@ fn fitting(widths: &[f32], gap: f32, available: f32) -> usize {
         .count()
 }
 
-fn idle_columns(width: f32, gap: f32) -> usize {
+fn idle_columns(width: f32, gap: f32, with_cost: bool) -> usize {
     let base = ROW_HEIGHT + 2.0 * IDLE_VALUE_WIDTH + 3.0 * gap + IDLE_NAME_MIN_WIDTH;
-    fitting(&[IDLE_CONTEXT_WIDTH, IDLE_MODEL_WIDTH], gap, width - base)
+    let optional: &[f32] = if with_cost {
+        &[IDLE_COST_WIDTH, IDLE_CONTEXT_WIDTH, IDLE_MODEL_WIDTH]
+    } else {
+        &[IDLE_CONTEXT_WIDTH, IDLE_MODEL_WIDTH]
+    };
+    fitting(optional, gap, width - base)
 }
 
 fn text_width(ui: &Ui, text: impl Into<egui::WidgetText>) -> f32 {
@@ -1189,12 +1253,29 @@ mod tests {
 
     #[test]
     fn idle_columns_hide_model_then_context_as_width_shrinks() {
-        assert_eq!(idle_columns(514.0, 8.0), 2);
-        assert_eq!(idle_columns(472.0, 8.0), 2);
-        assert_eq!(idle_columns(434.0, 8.0), 1);
-        assert_eq!(idle_columns(376.0, 8.0), 1);
-        assert_eq!(idle_columns(375.0, 8.0), 0);
-        assert_eq!(idle_columns(100.0, 8.0), 0);
+        assert_eq!(idle_columns(514.0, 8.0, false), 2);
+        assert_eq!(idle_columns(472.0, 8.0, false), 2);
+        assert_eq!(idle_columns(434.0, 8.0, false), 1);
+        assert_eq!(idle_columns(376.0, 8.0, false), 1);
+        assert_eq!(idle_columns(375.0, 8.0, false), 0);
+        assert_eq!(idle_columns(100.0, 8.0, false), 0);
+        assert_eq!(idle_columns(600.0, 8.0, true), 3);
+        assert_eq!(idle_columns(514.0, 8.0, true), 2);
+        assert_eq!(idle_columns(352.0, 8.0, true), 1);
+        assert_eq!(idle_columns(351.0, 8.0, true), 0);
+    }
+
+    #[test]
+    fn today_line_and_cost_read_plainly() {
+        assert_eq!(
+            today_text(6.24, 14.1),
+            "Today 6.2% of the weekly limit used · budget 14.1%"
+        );
+        assert_eq!(
+            today_text(-1.0, 14.1),
+            "Today 0.0% of the weekly limit used · budget 14.1%"
+        );
+        assert_eq!(dollars(0.456), "$0.46");
     }
 
     #[test]
@@ -1212,6 +1293,7 @@ mod tests {
             rejected,
             update: None,
             rate: None,
+            percent: None,
         };
         assert_eq!(
             sync_text(&synced(Vec::new()), 7 * HOUR),
@@ -1239,6 +1321,7 @@ s2: numbers must be >= 0"
                     rejected: Vec::new(),
                     update: Some("9.0.0".into()),
                     rate: None,
+                    percent: None,
                 },
                 7 * HOUR
             ),

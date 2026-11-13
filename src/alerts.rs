@@ -98,6 +98,49 @@ pub fn notify_limit(name: &str, window: Window, resets_in: &str) {
     );
 }
 
+const RUNAWAY_SHARE: f64 = 5.0;
+const MILLION: f64 = 1_000_000.0;
+
+#[derive(Default)]
+pub struct RunawayWarnings {
+    seen: HashSet<(String, String)>,
+}
+
+impl RunawayWarnings {
+    pub fn newly_hot<'a>(
+        &mut self,
+        sessions: impl IntoIterator<Item = &'a Session>,
+        percent_per_million: f64,
+        now: u64,
+    ) -> Vec<(&'a Session, f64)> {
+        let since = (now / HOUR_SECONDS).saturating_sub(1) * HOUR_SECONDS;
+        let mut hot = Vec::new();
+        for session in sessions {
+            for (hour, weight) in session.hour_weights() {
+                let share = weight as f64 * percent_per_million / MILLION;
+                let recent = unix_seconds(hour).is_some_and(|at| at >= since);
+                if recent
+                    && share >= RUNAWAY_SHARE
+                    && self.seen.insert((session.id.clone(), hour.to_owned()))
+                {
+                    hot.push((session, share));
+                }
+            }
+        }
+        hot
+    }
+}
+
+pub fn notify_runaway(session: &Session, share: f64) {
+    notify(
+        "Runaway Claude session",
+        format!(
+            "\"{}\" used {share:.1}% of the weekly limit within one hour. Check that it is not stuck in a loop.",
+            session.name()
+        ),
+    );
+}
+
 pub fn notify_over_budget(over: &crate::budget::OverBudget) {
     notify(
         "Today's Claude use is over budget",
@@ -172,6 +215,34 @@ mod tests {
             resets_at: 1_000_000 + 7 * 86_400,
         };
         assert_eq!(warnings.newly_crossed(&[("7d".into(), next_week)]).len(), 1);
+    }
+
+    #[test]
+    fn runaway_warns_once_for_a_recent_hour_over_five_percent_of_the_week() {
+        let mut hot = session("hot", 0);
+        let hour = |output_tokens| HourUsage {
+            output_tokens,
+            ..HourUsage::default()
+        };
+        hot.hours
+            .insert(("2026-11-13T07:00:00Z".into(), "a".into()), hour(500_000));
+        hot.hours
+            .insert(("2026-11-13T07:00:00Z".into(), "b".into()), hour(100_000));
+        hot.hours
+            .insert(("2026-11-13T02:00:00Z".into(), "a".into()), hour(900_000));
+        let calm = session("calm", 0);
+        let now = unix_seconds("2026-11-13T08:20:00Z").unwrap();
+        let mut warnings = RunawayWarnings::default();
+        let fresh = warnings.newly_hot([&hot, &calm], 2.0, now);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].0.id, "hot");
+        assert!((fresh[0].1 - 6.0).abs() < 1e-9);
+        assert!(warnings.newly_hot([&hot], 2.0, now).is_empty());
+        assert!(
+            RunawayWarnings::default()
+                .newly_hot([&hot], 1.0, now)
+                .is_empty()
+        );
     }
 
     #[test]

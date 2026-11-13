@@ -21,20 +21,10 @@ struct Category {
     hint: &'static str,
 }
 
-const OUTPUT_WEIGHT: u64 = 5;
 const MILLION: f64 = 1_000_000.0;
 
 pub fn estimated_cost(session: &Session, rate: f64) -> Option<f64> {
-    let weight: u64 = session
-        .hours
-        .values()
-        .map(|h| {
-            h.input_tokens
-                + h.cache_write_tokens
-                + h.cache_read_tokens
-                + OUTPUT_WEIGHT * (h.output_tokens + h.subagent_output_tokens)
-        })
-        .sum();
+    let weight = session.weight();
     (weight > 0 && rate > 0.0).then(|| weight as f64 / MILLION * rate)
 }
 

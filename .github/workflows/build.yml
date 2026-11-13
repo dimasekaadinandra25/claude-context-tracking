@@ -56,6 +56,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Tag matches Cargo.toml version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -72,4 +74,6 @@ jobs:
           cp dist/claude-usage-monitor-Windows/claude-usage-monitor.exe out/claude-usage-monitor-windows.exe
           cp dist/claude-usage-monitor-macOS/claude-usage-monitor out/claude-usage-monitor-macos
           cp dist/claude-usage-monitor-Linux/claude-usage-monitor out/claude-usage-monitor-linux
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Claude Usage Monitor $GITHUB_REF_NAME" --generate-notes
+          previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          git log --no-merges --format="- %s" ${previous:+$previous..}"$GITHUB_REF_NAME" | grep -v "^- Bump version" > notes.md || true
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Claude Usage Monitor $GITHUB_REF_NAME" --notes-file notes.md
