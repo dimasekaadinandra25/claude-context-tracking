@@ -6,7 +6,6 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const ICON_SIZE: u32 = 32;
-const ICON_RGB: [u8; 3] = [217, 119, 87];
 
 #[cfg(not(target_os = "linux"))]
 pub type Tray = TrayIcon;
@@ -112,20 +111,6 @@ fn build(
 }
 
 fn icon() -> Icon {
-    let center = (ICON_SIZE as f32 - 1.0) / 2.0;
-    let radius_sq = (ICON_SIZE as f32 / 2.0 - 1.0).powi(2);
-    let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let (dx, dy) = (x as f32 - center, y as f32 - center);
-            let alpha = if dx * dx + dy * dy <= radius_sq {
-                u8::MAX
-            } else {
-                0
-            };
-            rgba.extend_from_slice(&ICON_RGB);
-            rgba.push(alpha);
-        }
-    }
-    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).expect("icon buffer matches its dimensions")
+    Icon::from_rgba(crate::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
+        .expect("icon buffer matches its dimensions")
 }

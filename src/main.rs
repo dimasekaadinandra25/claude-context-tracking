@@ -8,6 +8,7 @@ mod cache;
 mod config;
 mod details;
 mod export;
+mod icon;
 mod index;
 mod mini;
 mod models;
@@ -24,6 +25,8 @@ mod watcher;
 use eframe::egui;
 use std::fs::TryLockError;
 use std::io::Write;
+
+const WINDOW_ICON_SIZE: u32 = 64;
 
 fn main() -> eframe::Result {
     install_crash_log();
@@ -48,7 +51,12 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(theme::WINDOW_SIZE)
-            .with_min_inner_size(theme::MIN_WINDOW_SIZE),
+            .with_min_inner_size(theme::MIN_WINDOW_SIZE)
+            .with_icon(egui::IconData {
+                rgba: icon::rgba(WINDOW_ICON_SIZE),
+                width: WINDOW_ICON_SIZE,
+                height: WINDOW_ICON_SIZE,
+            }),
         ..Default::default()
     };
     eframe::run_native(

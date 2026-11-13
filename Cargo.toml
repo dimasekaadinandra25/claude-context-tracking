@@ -17,6 +17,9 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tray-icon = "0.26.1"
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 
+[build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 

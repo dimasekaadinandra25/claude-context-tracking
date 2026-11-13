@@ -39,7 +39,7 @@ On launch it indexes all Claude Code sessions stored locally, then keeps watchin
 
 | OS | Also needed |
 |---|---|
-| Windows | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload |
+| Windows | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload (its Windows SDK provides `rc.exe`, which `build.rs` uses to embed the app icon drawn in `src/icon.rs`) |
 | macOS | Xcode Command Line Tools: `xcode-select --install` |
 | Linux (Debian/Ubuntu) | `sudo apt install libgtk-3-dev libxdo-dev libayatana-appindicator3-dev` |
 
