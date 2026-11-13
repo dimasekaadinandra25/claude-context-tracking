@@ -1,6 +1,6 @@
 [package]
 name = "claude-usage-monitor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Desktop tray app that tracks context usage of every local Claude Code session"
