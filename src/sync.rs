@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const PLAN_SYNC_GAP: Duration = Duration::from_secs(5 * 60);
 const STARTUP_DELAY: Duration = Duration::from_secs(60);
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SESSIONS: usize = 200;
@@ -172,10 +173,30 @@ struct Envelope {
     data: IngestResult,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 struct IngestResult {
-    #[serde(default)]
     rejected: Vec<Rejection>,
+    latest_app_version: Option<String>,
+}
+
+type PlanReading = Option<[Option<f64>; 2]>;
+
+fn plan_reading() -> PlanReading {
+    plan_limits::load().map(|limits| {
+        [limits.five_hour, limits.seven_day].map(|window| window.map(|w| w.used_percentage))
+    })
+}
+
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+pub fn is_newer(version: &str, than: &str) -> bool {
+    version_parts(version) > version_parts(than)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +207,7 @@ pub enum SyncStatus {
     Synced {
         at: SystemTime,
         rejected: Vec<Rejection>,
+        update: Option<String>,
     },
     KeyRejected,
     Failed(String),
@@ -195,6 +217,7 @@ pub struct Syncer {
     started: Instant,
     last_run: Option<Instant>,
     last_identity: SyncIdentity,
+    last_plan: PlanReading,
     requested: bool,
     running: Option<JoinHandle<()>>,
 }
@@ -205,6 +228,7 @@ impl Syncer {
             started: Instant::now(),
             last_run: None,
             last_identity: config::load().sync_identity(),
+            last_plan: plan_reading(),
             requested: false,
             running: None,
         }
@@ -224,14 +248,19 @@ impl Syncer {
             return;
         }
         let config = config::load();
+        let plan = plan_reading();
         let due = match self.last_run {
-            Some(at) => at.elapsed() >= SYNC_INTERVAL,
+            Some(at) => {
+                at.elapsed() >= SYNC_INTERVAL
+                    || (plan != self.last_plan && at.elapsed() >= PLAN_SYNC_GAP)
+            }
             None => self.started.elapsed() >= STARTUP_DELAY,
         };
         if !due && !self.requested && config.sync_identity() == self.last_identity {
             return;
         }
         self.requested = false;
+        self.last_plan = plan;
         self.last_run = Some(Instant::now());
         self.last_identity = config.sync_identity();
         if !config.is_enabled() {
@@ -320,6 +349,7 @@ fn run_with(
         config.server_url.trim().trim_end_matches('/')
     );
     let mut rejected = Vec::new();
+    let mut latest = None;
     let mut overheads = HashMap::new();
     for chunk in chunks(sessions, config::load_watermark(config).as_deref()) {
         for session in &chunk {
@@ -333,7 +363,11 @@ fn run_with(
             Err(error) => return SyncStatus::Failed(error.to_string()),
         };
         match post(&url, config.api_key.trim(), &body) {
-            Ok(response) => rejected.extend(rejections(&response)),
+            Ok(response) => {
+                let result = ingest_result(&response);
+                rejected.extend(result.rejected);
+                latest = result.latest_app_version.or(latest);
+            }
             Err(status) => return status,
         }
         let newest = chunk.last().map_or("", |s| s.last_activity());
@@ -344,12 +378,13 @@ fn run_with(
     SyncStatus::Synced {
         at: SystemTime::now(),
         rejected,
+        update: latest.filter(|version| is_newer(version, APP_VERSION)),
     }
 }
 
-fn rejections(body: &str) -> Vec<Rejection> {
+fn ingest_result(body: &str) -> IngestResult {
     serde_json::from_str::<Envelope>(body)
-        .map(|envelope| envelope.data.rejected)
+        .map(|envelope| envelope.data)
         .unwrap_or_default()
 }
 
@@ -818,6 +853,7 @@ mod tests {
 
     #[test]
     fn rejections_parse_from_response_envelope() {
+        let rejections = |body| ingest_result(body).rejected;
         assert_eq!(
             rejections(REJECTED_RESPONSE),
             [Rejection {
@@ -831,6 +867,35 @@ mod tests {
         );
         assert_eq!(rejections(r#"{"data":{"accepted":3},"message":"ok"}"#), []);
         assert_eq!(rejections("not json"), []);
+    }
+
+    #[test]
+    fn newer_team_version_is_offered_as_an_update() {
+        let _env = lock_env();
+        let dir = TempDir::new("sync-update");
+        unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
+        let sessions = [session_with_hours(0, 1, 1)];
+        let update = |body: String| {
+            let status = run_with(
+                move |_, _, _| Ok(body.clone()),
+                |_| Overhead::default(),
+                &enabled(),
+                &sessions,
+                "PC",
+            );
+            match status {
+                SyncStatus::Synced { update, .. } => update,
+                other => panic!("expected Synced, got {other:?}"),
+            }
+        };
+        let reply = |version: &str| {
+            format!(r#"{{"data":{{"accepted":1,"rejected":[],"latest_app_version":"{version}"}}}}"#)
+        };
+        assert_eq!(update(reply("999.0.0")), Some("999.0.0".to_owned()));
+        assert_eq!(update(reply(APP_VERSION)), None);
+        assert_eq!(update(String::new()), None);
+        assert!(is_newer("0.10.0", "0.9.1"));
+        assert!(!is_newer("0.2.0", "0.2.0-dev"));
     }
 
     #[test]

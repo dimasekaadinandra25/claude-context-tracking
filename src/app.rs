@@ -5,7 +5,7 @@ use crate::mini;
 use crate::models;
 use crate::overhead::{self, Overhead};
 use crate::plan_limits::{self, PlanLimits, Window};
-use crate::platform::{self, APP_NAME};
+use crate::platform::{self, APP_NAME, APP_VERSION};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
 use crate::sync::SyncStatus;
@@ -875,6 +875,15 @@ fn sync_label(ui: &mut Ui, status: &SyncStatus) -> bool {
     if *status == SyncStatus::KeyRejected {
         text = text.color(RED);
     }
+    if matches!(
+        status,
+        SyncStatus::Synced {
+            update: Some(_),
+            ..
+        }
+    ) {
+        text = text.color(theme::AMBER);
+    }
     let label = theme::pill(ui).show(ui, |ui| ui.label(text)).inner;
     if key_problem(status).is_some() {
         return label
@@ -895,22 +904,26 @@ fn sync_text(status: &SyncStatus, utc_offset: i64) -> (String, Option<String>) {
         SyncStatus::Waiting => ("Waiting to sync".to_owned(), None),
         SyncStatus::Syncing => ("Syncing…".to_owned(), None),
         SyncStatus::KeyRejected => ("Key rejected".to_owned(), None),
-        SyncStatus::Synced { at, rejected } => {
-            let text = format!("Synced {}", clock(*at, utc_offset));
-            if rejected.is_empty() {
-                return (text, None);
-            }
-            let reasons: Vec<String> = rejected
+        SyncStatus::Synced {
+            at,
+            rejected,
+            update,
+        } => {
+            let mut text = format!("Synced {}", clock(*at, utc_offset));
+            let mut hover: Vec<String> = rejected
                 .iter()
                 .map(|r| format!("{}: {}", r.session_id, r.reason))
                 .collect();
-            (
-                format!("{text} · {} rejected", rejected.len()),
-                Some(reasons.join(
-                    "
-",
-                )),
-            )
+            if !rejected.is_empty() {
+                text = format!("{text} · {} rejected", rejected.len());
+            }
+            if let Some(version) = update {
+                text = format!("{text} · v{version} available");
+                hover.push(format!(
+                    "Your team already runs v{version}, this app is v{APP_VERSION}. Update it."
+                ));
+            }
+            (text, (!hover.is_empty()).then(|| hover.join("\n")))
         }
         SyncStatus::Failed(reason) => {
             let short: String = reason.chars().take(SYNC_REASON_CHARS).collect();
@@ -1131,7 +1144,11 @@ mod tests {
 
     #[test]
     fn sync_text_counts_rejected_sessions() {
-        let synced = |rejected| SyncStatus::Synced { at: at(), rejected };
+        let synced = |rejected| SyncStatus::Synced {
+            at: at(),
+            rejected,
+            update: None,
+        };
         assert_eq!(
             sync_text(&synced(Vec::new()), 7 * HOUR),
             ("Synced 08:45".to_owned(), None)
@@ -1149,6 +1166,22 @@ mod tests {
 s2: numbers must be >= 0"
                         .to_owned()
                 )
+            )
+        );
+        assert_eq!(
+            sync_text(
+                &SyncStatus::Synced {
+                    at: at(),
+                    rejected: Vec::new(),
+                    update: Some("9.0.0".into()),
+                },
+                7 * HOUR
+            ),
+            (
+                "Synced 08:45 · v9.0.0 available".to_owned(),
+                Some(format!(
+                    "Your team already runs v9.0.0, this app is v{APP_VERSION}. Update it."
+                ))
             )
         );
         assert_eq!(

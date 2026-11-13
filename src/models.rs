@@ -45,9 +45,9 @@ pub fn totals<'a>(sessions: impl IntoIterator<Item = &'a Session>, since: u64) -
                 model: model.clone(),
                 ..ModelTotal::default()
             });
-        total.requests += u64::from(usage.requests);
+        total.requests += u64::from(usage.requests) + u64::from(usage.subagent_requests);
         total.input += usage.input_tokens + usage.cache_write_tokens + usage.cache_read_tokens;
-        total.output += usage.output_tokens;
+        total.output += usage.output_tokens + usage.subagent_output_tokens;
     }
     let mut rows: Vec<ModelTotal> = by_model
         .into_values()
@@ -150,6 +150,22 @@ mod tests {
             output_tokens: output,
             ..HourUsage::default()
         }
+    }
+
+    #[test]
+    fn subagent_requests_and_output_count_for_their_model() {
+        let mut a = Session::new("a".into());
+        a.hours.insert(
+            ("2026-11-11T02:00:00Z".into(), "claude-fable-5-2".into()),
+            HourUsage {
+                subagent_requests: 4,
+                subagent_output_tokens: 20,
+                cache_read_tokens: 100,
+                ..HourUsage::default()
+            },
+        );
+        let rows = totals([&a], 0);
+        assert_eq!((rows[0].requests, rows[0].output), (4, 20));
     }
 
     #[test]
