@@ -9,7 +9,7 @@ use crate::platform::{self, APP_NAME, APP_VERSION};
 use crate::session::{Session, format_age, format_tokens, local_offset, total_new_context};
 use crate::settings::Settings;
 use crate::sync::SyncStatus;
-use crate::theme::{self, ACCENT, FULL_AT, LIVE, RED};
+use crate::theme::{self, ACCENT, AMBER, FULL_AT, LIVE, RED};
 use crate::tray::{self, Tray};
 use crate::watcher::{self, Command, Update};
 use eframe::egui::collapsing_header::{CollapsingState, paint_default_icon};
@@ -870,6 +870,14 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<Today>) {
             }
         });
     });
+    if let Some(at) = limits
+        .seven_day
+        .filter(|w| w.resets_at > now)
+        .and_then(|w| w.runs_out_at(now))
+    {
+        let text = runs_out_text(at, now, local_offset());
+        ui.label(RichText::new(text).small().color(AMBER));
+    }
     let updated = updated_text(age);
     match today {
         Some(today) => {
@@ -881,6 +889,15 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<Today>) {
             ui.label(RichText::new(updated).small().weak());
         }
     }
+}
+
+fn runs_out_text(at: u64, now: u64, utc_offset: i64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let local = i64::try_from(at).unwrap_or_default() + utc_offset;
+    let day = DAYS[usize::try_from(local.div_euclid(86_400).rem_euclid(7)).unwrap_or_default()];
+    let time = clock(UNIX_EPOCH + Duration::from_secs(at), utc_offset);
+    let left = format_age(Duration::from_secs(at.saturating_sub(now)));
+    format!("At this pace the weekly limit runs out {day} {time} (in {left})")
 }
 
 fn updated_text(age: u64) -> String {
@@ -1445,6 +1462,19 @@ mod tests {
         assert_eq!(clock(at(), 7 * HOUR), "08:45");
         assert_eq!(clock(at(), -5 * HOUR), "20:45");
         assert_eq!(clock(at(), 5 * HOUR + 30 * 60), "07:15");
+    }
+
+    #[test]
+    fn runs_out_text_names_the_local_day_and_time() {
+        let monday_two_pm = 4 * 86_400 + 14 * 3_600;
+        assert_eq!(
+            runs_out_text(monday_two_pm, monday_two_pm - 2 * 86_400, 7 * 3_600),
+            "At this pace the weekly limit runs out Mon 21:00 (in 2d)"
+        );
+        assert_eq!(
+            runs_out_text(monday_two_pm, monday_two_pm - 5 * 3_600, -15 * 3_600),
+            "At this pace the weekly limit runs out Sun 23:00 (in 5h)"
+        );
     }
 
     #[test]

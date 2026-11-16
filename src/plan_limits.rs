@@ -73,6 +73,19 @@ impl Window {
         }
         Some(text)
     }
+
+    pub fn runs_out_at(&self, now: u64) -> Option<u64> {
+        let left = self.resets_at.checked_sub(now)? as f64;
+        let elapsed = WEEK_SECONDS - left;
+        if elapsed < DAY_SECONDS
+            || self.used_percentage <= 0.0
+            || self.used_percentage >= FULL_PERCENT
+        {
+            return None;
+        }
+        let until = (FULL_PERCENT - self.used_percentage) / (self.used_percentage / elapsed);
+        (until < left).then(|| now + until as u64)
+    }
 }
 
 impl PlanLimits {
@@ -527,6 +540,23 @@ mod tests {
             Some("budget 13.6%/day for 7.0 days")
         );
         assert_eq!(window(5.0, 0).weekly_budget(1_000_000), None);
+    }
+
+    #[test]
+    fn runs_out_only_when_the_pace_passes_full_before_the_reset() {
+        let day: u64 = 86_400;
+        let window = |used, days_left| Window {
+            used_percentage: used,
+            resets_at: 1_000_000 + days_left * day,
+        };
+        assert_eq!(
+            window(60.0, 5).runs_out_at(1_000_000),
+            Some(1_000_000 + 115_200)
+        );
+        assert_eq!(window(20.0, 5).runs_out_at(1_000_000), None);
+        assert_eq!(window(30.0, 7).runs_out_at(1_000_000), None);
+        assert_eq!(window(100.0, 3).runs_out_at(1_000_000), None);
+        assert_eq!(window(0.0, 3).runs_out_at(1_000_000), None);
     }
 
     #[test]
