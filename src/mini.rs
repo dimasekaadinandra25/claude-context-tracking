@@ -39,7 +39,7 @@ fn resize(ctx: &Context, logical: Vec2) {
     ctx.send_viewport_cmd(ViewportCommand::InnerSize(logical / ctx.zoom_factor()));
 }
 
-pub fn show(ui: &mut Ui, sessions: &[Session], today: u64) -> bool {
+pub fn show(ui: &mut Ui, sessions: &[Session], today: u64, budget: Option<&str>) -> bool {
     let active = active(sessions, SystemTime::now());
     let lines = if active.is_empty() { 2 } else { active.len() } as f32;
     theme::glass(ui)
@@ -51,7 +51,8 @@ pub fn show(ui: &mut Ui, sessions: &[Session], today: u64) -> bool {
             ui.add_space(((ui.available_height() - height) / 2.0).max(0.0));
             if active.is_empty() {
                 line(ui, |ui| {
-                    ui.add(Label::new(RichText::new("No active session").weak()).truncate())
+                    let first = budget.unwrap_or("No active session");
+                    ui.add(Label::new(RichText::new(first).weak()).truncate())
                 });
                 line(ui, |ui| {
                     ui.add(

@@ -56,11 +56,12 @@ pub fn weight_since<'a>(sessions: impl IntoIterator<Item = &'a Session>, since: 
         .sum()
 }
 
-pub fn tray_text(today: u64, active: usize, sync: &str) -> String {
-    format!(
-        "{APP_NAME}\n+{} new context today\n{active} active · {sync}",
-        format_tokens(today)
-    )
+pub fn tray_text(today: u64, active: usize, sync: &str, budget: Option<&str>) -> String {
+    let context = match budget {
+        Some(budget) => format!("{budget}\n+{} context", format_tokens(today)),
+        None => format!("+{} new context today", format_tokens(today)),
+    };
+    format!("{APP_NAME}\n{context}\n{active} active · {sync}")
 }
 
 #[derive(Default)]
@@ -400,8 +401,19 @@ mod tests {
     #[test]
     fn tray_text_summarizes_today() {
         assert_eq!(
-            tray_text(1_240_000, 1, "Synced 10:30"),
+            tray_text(1_240_000, 1, "Synced 10:30", None),
             format!("{APP_NAME}\n+1.2M new context today\n1 active · Synced 10:30")
+        );
+        assert_eq!(
+            tray_text(
+                1_240_000,
+                0,
+                "Synced 10:30",
+                Some("Today 6.2% of 14.1% budget")
+            ),
+            format!(
+                "{APP_NAME}\nToday 6.2% of 14.1% budget\n+1.2M context\n0 active · Synced 10:30"
+            )
         );
     }
 }

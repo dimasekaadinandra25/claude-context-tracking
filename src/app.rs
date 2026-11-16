@@ -266,7 +266,8 @@ impl App {
             return;
         };
         let sync = sync_text(&self.sync, local_offset()).0;
-        let text = alerts::tray_text(self.today_context, active.len(), &sync);
+        let budget = self.today_budget.map(short_today);
+        let text = alerts::tray_text(self.today_context, active.len(), &sync, budget.as_deref());
         if text != self.tray_tooltip {
             tray::set_tooltip(tray, &text);
             self.tray_tooltip = text;
@@ -809,8 +810,11 @@ impl eframe::App for App {
         self.refresh_overheads();
         if self.mini.is_some() {
             let today = self.today_context;
+            let budget = self.today_budget.map(short_today);
             let back = egui::CentralPanel::default()
-                .show(ui, |ui| mini::show(ui, &self.sessions, today))
+                .show(ui, |ui| {
+                    mini::show(ui, &self.sessions, today, budget.as_deref())
+                })
                 .inner;
             if back {
                 self.toggle_mini(ui.ctx());
@@ -905,6 +909,14 @@ fn today_text(today: Today) -> String {
         ));
     }
     text
+}
+
+fn short_today(today: Today) -> String {
+    format!(
+        "Today {:.1}% of {:.1}% budget",
+        today.used.max(0.0),
+        today.budget
+    )
 }
 
 fn per_request_cost(context: u64, rate: Option<f64>) -> Option<f64> {
@@ -1415,6 +1427,7 @@ mod tests {
             "Today 6.2% of the weekly limit used · budget 14.1% · you 3.1 of your 4.7%"
         );
         assert_eq!(dollars(0.456), "$0.46");
+        assert_eq!(short_today(today(6.24, None)), "Today 6.2% of 14.1% budget");
         assert_eq!(updated_text(20), "limits updated just now");
         assert_eq!(updated_text(5 * 60), "limits updated 5m ago");
         assert_eq!(
