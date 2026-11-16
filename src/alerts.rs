@@ -22,6 +22,15 @@ pub fn new_context_since<'a>(sessions: impl IntoIterator<Item = &'a Session>, si
         .sum()
 }
 
+pub fn weight_since<'a>(sessions: impl IntoIterator<Item = &'a Session>, since: u64) -> u64 {
+    sessions
+        .into_iter()
+        .flat_map(|s| &s.hours)
+        .filter(|((hour, _), _)| unix_seconds(hour).is_some_and(|at| at >= since))
+        .map(|(_, usage)| usage.weight())
+        .sum()
+}
+
 pub fn tray_text(today: u64, active: usize, sync: &str) -> String {
     format!(
         "{APP_NAME}\n+{} new context today\n{active} active · {sync}",
@@ -100,13 +109,27 @@ pub fn notify_limit(name: &str, window: Window, resets_in: &str) {
 
 const RUNAWAY_SHARE: f64 = 5.0;
 const MILLION: f64 = 1_000_000.0;
+const RUNAWAY_FILE: &str = "runaway_seen.json";
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct RunawayWarnings {
     seen: HashSet<(String, String)>,
 }
 
 impl RunawayWarnings {
+    pub fn load() -> Self {
+        std::fs::read_to_string(crate::config::dir().join(RUNAWAY_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        if let Ok(text) = serde_json::to_string(self) {
+            let _ = crate::export::write_atomic(&crate::config::dir().join(RUNAWAY_FILE), &text);
+        }
+    }
+
     pub fn newly_hot<'a>(
         &mut self,
         sessions: impl IntoIterator<Item = &'a Session>,
@@ -114,6 +137,9 @@ impl RunawayWarnings {
         now: u64,
     ) -> Vec<(&'a Session, f64)> {
         let since = (now / HOUR_SECONDS).saturating_sub(1) * HOUR_SECONDS;
+        self.seen.retain(|(_, hour)| {
+            unix_seconds(hour).is_some_and(|at| at + DAY_SECONDS as u64 >= since)
+        });
         let mut hot = Vec::new();
         for session in sessions {
             for (hour, weight) in session.hour_weights() {
@@ -137,6 +163,16 @@ pub fn notify_runaway(session: &Session, share: f64) {
         format!(
             "\"{}\" used {share:.1}% of the weekly limit within one hour. Check that it is not stuck in a loop.",
             session.name()
+        ),
+    );
+}
+
+pub fn notify_personal_over(mine: crate::budget::Personal) {
+    notify(
+        "You are over your share of today's budget",
+        format!(
+            "You used {:.1}% of the shared weekly limit today, more than your share of {:.1}%.",
+            mine.used, mine.share
         ),
     );
 }
@@ -243,6 +279,11 @@ mod tests {
                 .newly_hot([&hot], 1.0, now)
                 .is_empty()
         );
+        let mut restored: RunawayWarnings =
+            serde_json::from_str(&serde_json::to_string(&warnings).unwrap()).unwrap();
+        assert!(restored.newly_hot([&hot], 2.0, now).is_empty());
+        restored.newly_hot([&calm], 2.0, now + 3 * DAY_SECONDS as u64);
+        assert!(restored.seen.is_empty());
     }
 
     #[test]

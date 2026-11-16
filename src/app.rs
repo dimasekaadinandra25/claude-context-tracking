@@ -33,6 +33,9 @@ const IDLE_VALUE_WIDTH: f32 = 52.0;
 const IDLE_CONTEXT_WIDTH: f32 = 80.0;
 const IDLE_MODEL_WIDTH: f32 = 88.0;
 const IDLE_COST_WIDTH: f32 = 56.0;
+const BIG_CONTEXT: u64 = 150_000;
+const MILLION: f64 = 1_000_000.0;
+const BIG_CONTEXT_HINT: &str = "Every request re-reads the whole context from cache, so a large context costs this much on each turn even for a short question";
 const COST_HINT: &str = "Estimated plan cost of this session at this week's rate";
 const IDLE_NAME_MIN_WIDTH: f32 = 140.0;
 const MAX_CONTENT_WIDTH: f32 = 760.0;
@@ -82,8 +85,10 @@ pub struct App {
     limit_warnings: LimitWarnings,
     cost_rate: Option<f64>,
     percent_rate: Option<f64>,
+    account_members: Option<u32>,
     runaway: RunawayWarnings,
-    today_budget: Option<(f64, f64)>,
+    today_budget: Option<Today>,
+    tray_weekly: Option<u8>,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -91,6 +96,13 @@ pub struct App {
     warnings: FullWarnings,
     tray_tooltip: String,
     user_zoom: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Today {
+    used: f64,
+    budget: f64,
+    mine: Option<crate::budget::Personal>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,8 +147,10 @@ impl App {
             limit_warnings: LimitWarnings::default(),
             cost_rate: None,
             percent_rate: None,
-            runaway: RunawayWarnings::default(),
+            account_members: None,
+            runaway: RunawayWarnings::load(),
             today_budget: None,
+            tray_weekly: None,
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -166,9 +180,16 @@ impl App {
                 Update::Indexing { done, total } => self.indexing = Some((done, total)),
                 Update::Sessions(sessions) => latest = Some(sessions),
                 Update::Sync(status) => {
-                    if let SyncStatus::Synced { rate, percent, .. } = &status {
+                    if let SyncStatus::Synced {
+                        rate,
+                        percent,
+                        members,
+                        ..
+                    } = &status
+                    {
                         self.cost_rate = rate.or(self.cost_rate);
                         self.percent_rate = percent.or(self.percent_rate);
+                        self.account_members = members.or(self.account_members);
                     }
                     self.sync = status;
                 }
@@ -210,11 +231,14 @@ impl App {
             alerts::notify_full(session);
         }
         if let Some(rate) = self.percent_rate {
-            for (session, share) in
-                self.runaway
-                    .newly_hot(&self.sessions, rate, plan_limits::unix_now())
-            {
-                alerts::notify_runaway(session, share);
+            let hot = self
+                .runaway
+                .newly_hot(&self.sessions, rate, plan_limits::unix_now());
+            for (session, share) in &hot {
+                alerts::notify_runaway(session, *share);
+            }
+            if !hot.is_empty() {
+                self.runaway.save();
             }
         }
         let Some(tray) = &self.tray else {
@@ -303,15 +327,39 @@ impl App {
                 if let Some(window) = limits.seven_day.filter(|w| w.resets_at > now) {
                     let saved = crate::budget::load();
                     let day = alerts::day_start(now, local_offset());
-                    let (state, over) = crate::budget::step(saved.clone(), day, window, now);
+                    let (mut state, over) = crate::budget::step(saved.clone(), day, window, now);
+                    let mine =
+                        self.percent_rate
+                            .zip(self.account_members)
+                            .and_then(|(rate, members)| {
+                                let used = alerts::weight_since(&self.sessions, day) as f64 * rate
+                                    / MILLION;
+                                crate::budget::personal(&mut state, used, members)
+                            });
                     if saved.as_ref() != Some(&state) {
                         crate::budget::save(&state);
                     }
-                    self.today_budget =
-                        Some((window.used_percentage - state.start_used, state.budget));
+                    self.today_budget = Some(Today {
+                        used: window.used_percentage - state.start_used,
+                        budget: state.budget,
+                        mine: mine.map(|(mine, _)| mine),
+                    });
                     if let Some(over) = over {
                         alerts::notify_over_budget(&over);
                     }
+                    if let Some((mine, true)) = mine {
+                        alerts::notify_personal_over(mine);
+                    }
+                }
+                let weekly = limits
+                    .seven_day
+                    .filter(|w| w.resets_at > now)
+                    .map(|w| w.used_percentage.clamp(0.0, 100.0) as u8);
+                if weekly != self.tray_weekly
+                    && let Some(tray) = &self.tray
+                {
+                    tray::set_weekly(tray, weekly.map(|percent| f32::from(percent) / 100.0));
+                    self.tray_weekly = weekly;
                 }
                 for (label, window) in self.limit_warnings.newly_crossed(&limits.live(now)) {
                     let left =
@@ -597,6 +645,17 @@ impl App {
                 );
                 let bar =
                     self.context_bar(ui, session, vec2(ui.available_width(), ACTIVE_BAR_HEIGHT));
+                if let Some(cost) = per_request_cost(session.latest_context, self.cost_rate) {
+                    ui.label(
+                        RichText::new(format!(
+                            "≈ {} per request at this size · /compact or /clear to cut it",
+                            dollars(cost)
+                        ))
+                        .small()
+                        .color(ACCENT),
+                    )
+                    .on_hover_text(BIG_CONTEXT_HINT);
+                }
                 let latest = RichText::new(session.latest_label()).small().weak();
                 let reserve =
                     ROW_HEIGHT + text_width(ui, latest.clone()) + 2.0 * ui.spacing().item_spacing.x;
@@ -757,7 +816,7 @@ fn limit_name(label: &str) -> String {
     }
 }
 
-fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<(f64, f64)>) {
+fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<Today>) {
     let now = plan_limits::unix_now();
     let windows = limits.live(now);
     if windows.is_empty() {
@@ -769,21 +828,31 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<(f64, f64)>) 
             plan_limit_meter(column, &label, window, now);
         }
     });
-    if let Some((used, budget)) = today {
-        let text = RichText::new(today_text(used, budget)).small();
-        ui.label(if used > budget {
-            text.color(RED)
-        } else {
-            text.weak()
-        });
+    if let Some(today) = today {
+        let over = today.used > today.budget || today.mine.is_some_and(|m| m.used > m.share);
+        let text = RichText::new(today_text(today)).small();
+        ui.label(if over { text.color(RED) } else { text.weak() });
     }
 }
 
-fn today_text(used: f64, budget: f64) -> String {
-    format!(
-        "Today {:.1}% of the weekly limit used · budget {budget:.1}%",
-        used.max(0.0)
-    )
+fn today_text(today: Today) -> String {
+    let mut text = format!(
+        "Today {:.1}% of the weekly limit used · budget {:.1}%",
+        today.used.max(0.0),
+        today.budget
+    );
+    if let Some(mine) = today.mine {
+        text.push_str(&format!(
+            " · you {:.1} of your {:.1}%",
+            mine.used, mine.share
+        ));
+    }
+    text
+}
+
+fn per_request_cost(context: u64, rate: Option<f64>) -> Option<f64> {
+    rate.filter(|_| context >= BIG_CONTEXT)
+        .map(|rate| context as f64 * rate / MILLION)
 }
 
 fn dollars(cost: f64) -> String {
@@ -1267,15 +1336,31 @@ mod tests {
 
     #[test]
     fn today_line_and_cost_read_plainly() {
+        let today = |used, mine| Today {
+            used,
+            budget: 14.1,
+            mine,
+        };
         assert_eq!(
-            today_text(6.24, 14.1),
+            today_text(today(6.24, None)),
             "Today 6.2% of the weekly limit used · budget 14.1%"
         );
         assert_eq!(
-            today_text(-1.0, 14.1),
+            today_text(today(-1.0, None)),
             "Today 0.0% of the weekly limit used · budget 14.1%"
         );
+        let mine = crate::budget::Personal {
+            used: 3.12,
+            share: 4.7,
+        };
+        assert_eq!(
+            today_text(today(6.24, Some(mine))),
+            "Today 6.2% of the weekly limit used · budget 14.1% · you 3.1 of your 4.7%"
+        );
         assert_eq!(dollars(0.456), "$0.46");
+        assert_eq!(per_request_cost(149_999, Some(0.5)), None);
+        assert_eq!(per_request_cost(200_000, None), None);
+        assert_eq!(per_request_cost(200_000, Some(0.5)), Some(0.1));
     }
 
     #[test]
@@ -1294,6 +1379,7 @@ mod tests {
             update: None,
             rate: None,
             percent: None,
+            members: None,
         };
         assert_eq!(
             sync_text(&synced(Vec::new()), 7 * HOUR),
@@ -1322,6 +1408,7 @@ s2: numbers must be >= 0"
                     update: Some("9.0.0".into()),
                     rate: None,
                     percent: None,
+                    members: None,
                 },
                 7 * HOUR
             ),

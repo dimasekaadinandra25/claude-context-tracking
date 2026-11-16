@@ -50,6 +50,14 @@ pub fn set_tooltip(tray: &Tray, text: &str) {
 #[cfg(target_os = "linux")]
 pub fn set_tooltip(_tray: &Tray, _text: &str) {}
 
+#[cfg(not(target_os = "linux"))]
+pub fn set_weekly(tray: &Tray, used: Option<f32>) {
+    let _ = tray.set_icon(Some(icon_filled(used)));
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_weekly(_tray: &Tray, _used: Option<f32>) {}
+
 pub fn set_window_visible(ctx: &egui::Context, visible: bool) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
     if visible {
@@ -111,6 +119,13 @@ fn build(
 }
 
 fn icon() -> Icon {
-    Icon::from_rgba(crate::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
-        .expect("icon buffer matches its dimensions")
+    icon_filled(None)
+}
+
+fn icon_filled(used: Option<f32>) -> Icon {
+    let pixels = match used {
+        Some(used) => crate::icon::rgba_filled(ICON_SIZE, used.clamp(0.0, 1.0)),
+        None => crate::icon::rgba(ICON_SIZE),
+    };
+    Icon::from_rgba(pixels, ICON_SIZE, ICON_SIZE).expect("icon buffer matches its dimensions")
 }

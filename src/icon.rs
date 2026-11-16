@@ -13,21 +13,21 @@ fn in_rounded_square(x: f32, y: f32) -> bool {
     dx <= 0.0 || dy <= 0.0 || dx * dx + dy * dy <= CORNER * CORNER
 }
 
-fn ring_alpha(x: f32, y: f32) -> f32 {
+fn ring_alpha(x: f32, y: f32, filled: f32) -> f32 {
     let (dx, dy) = (x - 0.5, y - 0.5);
     let radius = (dx * dx + dy * dy).sqrt();
     if !(RING_INNER..=RING_OUTER).contains(&radius) {
         return 0.0;
     }
     let turns = dx.atan2(-dy).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
-    if turns <= FILLED_TURNS {
-        1.0
-    } else {
-        TRACK_ALPHA
-    }
+    if turns <= filled { 1.0 } else { TRACK_ALPHA }
 }
 
 pub fn rgba(size: u32) -> Vec<u8> {
+    rgba_filled(size, FILLED_TURNS)
+}
+
+pub fn rgba_filled(size: u32, filled: f32) -> Vec<u8> {
     let step = 1.0 / (size * SAMPLES) as f32;
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
     for py in 0..size {
@@ -41,7 +41,7 @@ pub fn rgba(size: u32) -> Vec<u8> {
                     if !in_rounded_square(x, y) {
                         continue;
                     }
-                    let ring = ring_alpha(x, y);
+                    let ring = ring_alpha(x, y, filled);
                     for (channel, value) in color.iter_mut().enumerate() {
                         *value +=
                             BACKGROUND[channel] + (RING[channel] - BACKGROUND[channel]) * ring;
@@ -79,5 +79,17 @@ mod tests {
         assert_eq!(at(0, 0)[3], 0);
         assert_eq!(at(32, 32), [217, 119, 87, 255]);
         assert_eq!(at(32 + 17, 32), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn filled_share_of_the_ring_follows_the_fraction() {
+        let size = 64;
+        let alpha_left = |filled| {
+            let pixels = rgba_filled(size, filled);
+            let i = ((32 * size + 32 - 17) * 4) as usize;
+            pixels[i]
+        };
+        assert_eq!(alpha_left(0.8), 255);
+        assert!(alpha_left(0.5) < 255);
     }
 }

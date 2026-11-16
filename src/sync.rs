@@ -180,6 +180,7 @@ struct IngestResult {
     latest_app_version: Option<String>,
     cost_per_million_tokens: Option<f64>,
     percent_per_million_tokens: Option<f64>,
+    account_members: Option<u32>,
 }
 
 type PlanReading = Option<u64>;
@@ -210,6 +211,7 @@ pub enum SyncStatus {
         update: Option<String>,
         rate: Option<f64>,
         percent: Option<f64>,
+        members: Option<u32>,
     },
     KeyRejected,
     Failed(String),
@@ -359,6 +361,7 @@ fn run_with(
     let mut latest = None;
     let mut rate = None;
     let mut percent = None;
+    let mut members = None;
     let mut overheads = HashMap::new();
     let mut batches = chunks(sessions, config::load_watermark(config).as_deref());
     if batches.is_empty() {
@@ -382,6 +385,7 @@ fn run_with(
                 latest = result.latest_app_version.or(latest);
                 rate = result.cost_per_million_tokens.or(rate);
                 percent = result.percent_per_million_tokens.or(percent);
+                members = result.account_members.or(members);
             }
             Err(status) => return status,
         }
@@ -397,6 +401,7 @@ fn run_with(
         update: latest.filter(|version| is_newer(version, APP_VERSION)),
         rate,
         percent,
+        members,
     }
 }
 
@@ -953,7 +958,7 @@ mod tests {
         let rate = run_with(
             |_, _, _| {
                 Ok(
-                    r#"{"data":{"accepted":1,"cost_per_million_tokens":1.25,"percent_per_million_tokens":2.5}}"#
+                    r#"{"data":{"accepted":1,"cost_per_million_tokens":1.25,"percent_per_million_tokens":2.5,"account_members":3}}"#
                         .to_owned(),
                 )
             },
@@ -963,7 +968,7 @@ mod tests {
             "PC",
         );
         assert!(
-            matches!(rate, SyncStatus::Synced { rate: Some(r), percent: Some(p), .. } if r == 1.25 && p == 2.5)
+            matches!(rate, SyncStatus::Synced { rate: Some(r), percent: Some(p), members: Some(3), .. } if r == 1.25 && p == 2.5)
         );
         assert!(is_newer("0.10.0", "0.9.1"));
         assert!(!is_newer("0.2.0", "0.2.0-dev"));

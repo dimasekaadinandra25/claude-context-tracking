@@ -15,6 +15,8 @@ pub struct DayBudget {
     pub start_used: f64,
     pub budget: f64,
     pub notified: bool,
+    #[serde(default)]
+    pub personal_notified: bool,
 }
 
 pub struct OverBudget {
@@ -30,6 +32,7 @@ fn start(day: u64, window: Window, now: u64) -> DayBudget {
         start_used: window.used_percentage,
         budget: (FULL_PERCENT - window.used_percentage).max(0.0) / days_left.max(1.0),
         notified: false,
+        personal_notified: false,
     }
 }
 
@@ -50,6 +53,25 @@ pub fn step(
     state.notified = true;
     let budget = state.budget;
     (state, Some(OverBudget { used_today, budget }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Personal {
+    pub used: f64,
+    pub share: f64,
+}
+
+pub fn personal(state: &mut DayBudget, used: f64, members: u32) -> Option<(Personal, bool)> {
+    if members < 2 {
+        return None;
+    }
+    let mine = Personal {
+        used,
+        share: state.budget / f64::from(members),
+    };
+    let over = mine.used > mine.share && !state.personal_notified;
+    state.personal_notified |= over;
+    Some((mine, over))
 }
 
 pub fn load() -> Option<DayBudget> {
@@ -90,6 +112,18 @@ mod tests {
         assert!(over.is_none() && state.notified);
         let (next_day, over) = step(Some(state), 6, window(40.0), now + DAY);
         assert!(over.is_none() && !next_day.notified && next_day.start_used == 40.0);
+    }
+
+    #[test]
+    fn a_shared_account_splits_the_budget_and_warns_the_member_once() {
+        let (mut state, _) = step(None, 5, window(20.0), 5 * DAY);
+        assert_eq!(personal(&mut state, 3.0, 1), None);
+        let (mine, over) = personal(&mut state, 3.0, 4).expect("shared");
+        assert_eq!((mine.share, over), (4.0, false));
+        let (_, over) = personal(&mut state, 4.5, 4).expect("shared");
+        assert!(over && state.personal_notified);
+        let (_, again) = personal(&mut state, 6.0, 4).expect("shared");
+        assert!(!again);
     }
 
     #[test]
