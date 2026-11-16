@@ -34,6 +34,9 @@ const IDLE_CONTEXT_WIDTH: f32 = 80.0;
 const IDLE_MODEL_WIDTH: f32 = 88.0;
 const IDLE_COST_WIDTH: f32 = 56.0;
 const BIG_CONTEXT: u64 = 150_000;
+const STALE_LIMITS_SECONDS: u64 = 15 * 60;
+const STALE_OPACITY: f32 = 0.45;
+const MINUTE_SECONDS: u64 = 60;
 const MILLION: f64 = 1_000_000.0;
 const BIG_CONTEXT_HINT: &str = "Every request re-reads the whole context from cache, so a large context costs this much on each turn even for a short question";
 const COST_HINT: &str = "Estimated plan cost of this session at this week's rate";
@@ -116,6 +119,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, hidden: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let config = config::load();
+        alerts::restore_snooze(config.snoozed_until);
         if !config.is_enabled() && config::claim_key_reminder() {
             alerts::notify_key_reminder();
         }
@@ -322,6 +326,19 @@ impl App {
             self.plan_limits = plan_limits::load();
             self.plan_limits_refreshed = Some(Instant::now());
             self.today_budget = None;
+            let now = plan_limits::unix_now();
+            let weekly = self
+                .plan_limits
+                .as_ref()
+                .and_then(|limits| limits.seven_day)
+                .filter(|w| w.resets_at > now)
+                .map(|w| w.used_percentage.clamp(0.0, 100.0) as u8);
+            if weekly != self.tray_weekly
+                && let Some(tray) = &self.tray
+            {
+                tray::set_weekly(tray, weekly.map(|percent| f32::from(percent) / 100.0));
+                self.tray_weekly = weekly;
+            }
             if let Some(limits) = &self.plan_limits {
                 let now = plan_limits::unix_now();
                 if let Some(window) = limits.seven_day.filter(|w| w.resets_at > now) {
@@ -351,16 +368,7 @@ impl App {
                         alerts::notify_personal_over(mine);
                     }
                 }
-                let weekly = limits
-                    .seven_day
-                    .filter(|w| w.resets_at > now)
-                    .map(|w| w.used_percentage.clamp(0.0, 100.0) as u8);
-                if weekly != self.tray_weekly
-                    && let Some(tray) = &self.tray
-                {
-                    tray::set_weekly(tray, weekly.map(|percent| f32::from(percent) / 100.0));
-                    self.tray_weekly = weekly;
-                }
+
                 for (label, window) in self.limit_warnings.newly_crossed(&limits.live(now)) {
                     let left =
                         format_age(Duration::from_secs(window.resets_at.saturating_sub(now)));
@@ -823,15 +831,40 @@ fn plan_limits_row(ui: &mut Ui, limits: &PlanLimits, today: Option<Today>) {
         return;
     }
     ui.add_space(6.0);
-    ui.columns(windows.len(), |columns| {
-        for (column, (label, window)) in columns.iter_mut().zip(windows) {
-            plan_limit_meter(column, &label, window, now);
+    let age = now.saturating_sub(limits.captured_at);
+    ui.scope(|ui| {
+        if age >= STALE_LIMITS_SECONDS {
+            ui.multiply_opacity(STALE_OPACITY);
         }
+        ui.columns(windows.len(), |columns| {
+            for (column, (label, window)) in columns.iter_mut().zip(windows) {
+                plan_limit_meter(column, &label, window, now);
+            }
+        });
     });
-    if let Some(today) = today {
-        let over = today.used > today.budget || today.mine.is_some_and(|m| m.used > m.share);
-        let text = RichText::new(today_text(today)).small();
-        ui.label(if over { text.color(RED) } else { text.weak() });
+    let updated = updated_text(age);
+    match today {
+        Some(today) => {
+            let over = today.used > today.budget || today.mine.is_some_and(|m| m.used > m.share);
+            let text = RichText::new(format!("{} · {updated}", today_text(today))).small();
+            ui.label(if over { text.color(RED) } else { text.weak() });
+        }
+        None => {
+            ui.label(RichText::new(updated).small().weak());
+        }
+    }
+}
+
+fn updated_text(age: u64) -> String {
+    let when = if age < MINUTE_SECONDS {
+        "just now".to_owned()
+    } else {
+        format!("{} ago", format_age(Duration::from_secs(age)))
+    };
+    if age >= STALE_LIMITS_SECONDS {
+        format!("limits updated {when}, may be out of date")
+    } else {
+        format!("limits updated {when}")
     }
 }
 
@@ -1358,6 +1391,12 @@ mod tests {
             "Today 6.2% of the weekly limit used · budget 14.1% · you 3.1 of your 4.7%"
         );
         assert_eq!(dollars(0.456), "$0.46");
+        assert_eq!(updated_text(20), "limits updated just now");
+        assert_eq!(updated_text(5 * 60), "limits updated 5m ago");
+        assert_eq!(
+            updated_text(2 * 3_600),
+            "limits updated 2h ago, may be out of date"
+        );
         assert_eq!(per_request_cost(149_999, Some(0.5)), None);
         assert_eq!(per_request_cost(200_000, None), None);
         assert_eq!(per_request_cost(200_000, Some(0.5)), Some(0.1));

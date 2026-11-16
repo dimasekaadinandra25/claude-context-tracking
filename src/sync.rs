@@ -415,6 +415,7 @@ fn post(url: &str, key: &str, body: &str) -> Result<String, SyncStatus> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .into();
     let mut request = agent.post(url);

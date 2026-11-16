@@ -74,14 +74,17 @@ fn build(
     let show = MenuItem::new("Show", true, None);
     let mini = MenuItem::new("Mini mode", true, None);
     let sync = MenuItem::new("Sync now", true, None);
+    let snooze = MenuItem::new("Snooze alerts until tomorrow", true, None);
+    let resume = MenuItem::new("Resume alerts", true, None);
     let open = MenuItem::new("Open data file", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
-    menu.append_items(&[&show, &mini, &sync, &open, &quit])
+    menu.append_items(&[&show, &mini, &sync, &snooze, &resume, &open, &quit])
         .ok()?;
 
     let (show_id, mini_id, sync_id) = (show.id().clone(), mini.id().clone(), sync.id().clone());
     let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+    let (snooze_id, resume_id) = (snooze.id().clone(), resume.id().clone());
     let menu_ctx = ctx.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == show_id {
@@ -91,6 +94,13 @@ fn build(
             set_window_visible(&menu_ctx, true);
         } else if event.id == sync_id {
             let _ = commands.send(Command::SyncNow);
+        } else if event.id == snooze_id {
+            crate::alerts::snooze_until(crate::alerts::tomorrow(
+                crate::plan_limits::unix_now(),
+                crate::session::local_offset(),
+            ));
+        } else if event.id == resume_id {
+            crate::alerts::snooze_until(0);
         } else if event.id == open_id {
             platform::open_in_default_app(&platform::data_file());
         } else if event.id == quit_id {

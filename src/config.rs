@@ -22,6 +22,7 @@ pub struct Config {
     pub light_mode: bool,
     pub hide_titles: bool,
     pub key_reminder_shown: bool,
+    pub snoozed_until: u64,
     pub chained_status_line: String,
 }
 
@@ -112,6 +113,29 @@ pub fn api_key_from_env() -> bool {
     env_value(API_KEY_VAR).is_some()
 }
 
+pub fn server_url_from_env() -> bool {
+    env_value(SERVER_URL_VAR).is_some()
+}
+
+pub fn shown_server_url() -> String {
+    with_defaults(saved()).server_url
+}
+
+pub fn is_insecure(server_url: &str) -> bool {
+    let url = server_url.trim().to_ascii_lowercase();
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or_default();
+    !matches!(host, "localhost" | "127.0.0.1" | "[")
+}
+
+pub fn save_snooze(until: u64) -> io::Result<()> {
+    let mut config = editable()?;
+    config.snoozed_until = until;
+    write(CONFIG_FILE, &config)
+}
+
 pub fn saved() -> Config {
     read(CONFIG_FILE).unwrap_or_default()
 }
@@ -130,8 +154,14 @@ fn with_defaults(mut config: Config) -> Config {
     config
 }
 
-pub fn save_settings(api_key: &str, hide_titles: bool) -> io::Result<()> {
+pub fn save_settings(server_url: Option<&str>, api_key: &str, hide_titles: bool) -> io::Result<()> {
     let mut config = editable()?;
+    if let Some(server_url) = server_url {
+        server_url
+            .trim()
+            .trim_end_matches('/')
+            .clone_into(&mut config.server_url);
+    }
     api_key.trim().clone_into(&mut config.api_key);
     config.hide_titles = hide_titles;
     write(CONFIG_FILE, &config)
@@ -267,7 +297,7 @@ mod tests {
         unsafe { std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path()) };
         assert!(claim_key_reminder());
         assert!(!claim_key_reminder());
-        save_settings("key", true).unwrap();
+        save_settings(None, "key", true).unwrap();
         save_light_mode(true).unwrap();
         assert!(saved().key_reminder_shown);
         assert!(!claim_key_reminder());
@@ -297,7 +327,7 @@ mod tests {
         std::fs::write(&path, "{\"api_key\": \"kept\",").unwrap();
         assert!(!claim_key_reminder());
         assert!(save_light_mode(true).is_err());
-        assert!(save_settings("other", false).is_err());
+        assert!(save_settings(None, "other", false).is_err());
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "{\"api_key\": \"kept\","
@@ -321,5 +351,14 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(with_defaults(custom).server_url, "http://team:8080");
+    }
+
+    #[test]
+    fn plain_http_is_only_fine_on_this_computer() {
+        assert!(is_insecure("http://team.example.com:8080"));
+        assert!(is_insecure(" HTTP://10.0.0.5 "));
+        assert!(!is_insecure("https://team.example.com"));
+        assert!(!is_insecure("http://localhost:8080"));
+        assert!(!is_insecure("http://127.0.0.1:8080/"));
     }
 }

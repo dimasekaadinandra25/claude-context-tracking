@@ -230,15 +230,15 @@ impl UsageLimit {
 
 #[derive(Deserialize)]
 struct UsageWindow {
-    utilization: f64,
-    resets_at: String,
+    utilization: Option<f64>,
+    resets_at: Option<String>,
 }
 
 impl UsageWindow {
     fn window(&self) -> Option<Window> {
         Some(Window {
-            used_percentage: self.utilization,
-            resets_at: crate::session::unix_seconds(&self.resets_at)?,
+            used_percentage: self.utilization?,
+            resets_at: crate::session::unix_seconds(self.resets_at.as_deref()?)?,
         })
     }
 }
@@ -306,7 +306,8 @@ impl UsagePoller {
         }
         self.last_run = Some(Instant::now());
         self.running = Some(std::thread::spawn(|| {
-            if let Some(limits) = fetch(unix_now())
+            if is_enabled()
+                && let Some(limits) = fetch(unix_now())
                 && let Ok(text) = serde_json::to_string(&limits)
             {
                 let _ = write_atomic(&path(), &text);
@@ -546,6 +547,13 @@ mod tests {
             }]
         );
         assert_eq!(limits.five_hour, None);
+        let idle = limits_from(
+            r#"{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":19.5,"resets_at":"2026-11-18T15:00:00Z"}}"#,
+            7,
+        )
+        .expect("the weekly window survives an empty 5-hour one");
+        assert_eq!(idle.five_hour, None);
+        assert_eq!(idle.seven_day.map(|w| w.used_percentage), Some(19.5));
         assert_eq!(
             limits.seven_day,
             Some(Window {

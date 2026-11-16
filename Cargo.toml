@@ -15,6 +15,7 @@ notify-rust = "4.18.2"
 raw-window-handle = "0.6.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.1"
 tray-icon = "0.26.1"
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 

@@ -7,10 +7,13 @@ use eframe::egui::{self, RichText};
 use std::io;
 
 const FIELD_WIDTH: f32 = 320.0;
+const INSECURE_HINT: &str = "Not encrypted: your API key and usage travel in plain text. Use an https:// address for a server on another computer.";
 const PRIVACY_HINT: &str = "Sync sends only models, token counts, activity counts (lines, commits, tools), plan limit percentages and your Claude account email and plan, not what your sessions are about. Changing this re-sends all sessions so the dashboard updates.";
 const PLAN_LIMITS_HINT: &str = "Adds a small step to Claude Code's status line to read your 5-hour and 7-day usage. Your current status line keeps working and no tokens are used. Pro, Max and Ultra plans only; the numbers appear after Claude's next reply.";
 
 pub struct Settings {
+    server_url: String,
+    url_from_env: bool,
     api_key: String,
     key_from_env: bool,
     start_with_windows: bool,
@@ -27,6 +30,8 @@ impl Settings {
         let start_with_windows = autostart::is_enabled();
         let plan_limits = plan_limits::is_enabled();
         Self {
+            server_url: config::shown_server_url(),
+            url_from_env: config::server_url_from_env(),
             api_key: saved.api_key,
             key_from_env: config::api_key_from_env(),
             start_with_windows,
@@ -39,7 +44,8 @@ impl Settings {
     }
 
     fn save(&self) -> io::Result<()> {
-        config::save_settings(&self.api_key, self.hide_titles)?;
+        let server_url = (!self.url_from_env).then_some(self.server_url.as_str());
+        config::save_settings(server_url, &self.api_key, self.hide_titles)?;
         if self.start_with_windows != self.started_with_windows {
             autostart::set(self.start_with_windows)?;
         }
@@ -53,6 +59,18 @@ impl Settings {
         let mut open = true;
         let mut save = false;
         theme::dialog(ctx, "Settings", &mut open, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Server URL");
+                ui.add_enabled(
+                    !self.url_from_env,
+                    egui::TextEdit::singleline(&mut self.server_url).desired_width(FIELD_WIDTH),
+                );
+            });
+            if self.url_from_env {
+                ui.label(RichText::new("Set by environment variable").small().weak());
+            } else if config::is_insecure(&self.server_url) {
+                ui.colored_label(RED, INSECURE_HINT);
+            }
             ui.horizontal(|ui| {
                 ui.label("API key");
                 ui.add_enabled(
@@ -108,7 +126,7 @@ mod tests {
             std::env::set_var("CLAUDE_USAGE_CONFIG_DIR", dir.path());
             std::env::set_var("CLAUDE_USAGE_API_KEY", "from-env");
         }
-        config::save_settings("from-file", false).unwrap();
+        config::save_settings(Some("https://team.example.com/"), "from-file", false).unwrap();
         let mut settings = Settings::load();
         assert!(settings.key_from_env);
         assert_eq!(settings.api_key, "from-file");
@@ -119,5 +137,6 @@ mod tests {
         let saved = config::saved();
         assert_eq!(saved.api_key, "from-file");
         assert!(saved.hide_titles);
+        assert_eq!(saved.server_url, "https://team.example.com");
     }
 }

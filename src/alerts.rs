@@ -3,6 +3,26 @@ use crate::platform::APP_NAME;
 use crate::session::{Session, format_tokens, unix_seconds};
 use crate::theme::{FULL_AT, WARN_AT};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SNOOZED_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+pub fn restore_snooze(until: u64) {
+    SNOOZED_UNTIL.store(until, Ordering::Relaxed);
+}
+
+pub fn snooze_until(until: u64) {
+    restore_snooze(until);
+    let _ = crate::config::save_snooze(until);
+}
+
+pub fn tomorrow(now: u64, utc_offset: i64) -> u64 {
+    day_start(now, utc_offset) + DAY_SECONDS as u64
+}
+
+fn snoozed(now: u64) -> bool {
+    now < SNOOZED_UNTIL.load(Ordering::Relaxed)
+}
 
 const DAY_SECONDS: i64 = 86_400;
 const LIMIT_STEPS: [f64; 2] = [80.0, 90.0];
@@ -195,6 +215,9 @@ pub fn notify_key_reminder() {
 }
 
 fn notify(summary: &'static str, body: String) {
+    if snoozed(crate::plan_limits::unix_now()) {
+        return;
+    }
     std::thread::spawn(move || {
         let _ = notify_rust::Notification::new()
             .appname(APP_NAME)
@@ -284,6 +307,16 @@ mod tests {
         assert!(restored.newly_hot([&hot], 2.0, now).is_empty());
         restored.newly_hot([&calm], 2.0, now + 3 * DAY_SECONDS as u64);
         assert!(restored.seen.is_empty());
+    }
+
+    #[test]
+    fn snooze_lasts_until_the_next_local_midnight() {
+        let noon_utc = 1_793_620_800;
+        assert_eq!(tomorrow(noon_utc, 7 * 3_600), 1_793_552_400 + 86_400);
+        restore_snooze(tomorrow(noon_utc, 0));
+        assert!(snoozed(noon_utc));
+        assert!(!snoozed(tomorrow(noon_utc, 0)));
+        restore_snooze(0);
     }
 
     #[test]
