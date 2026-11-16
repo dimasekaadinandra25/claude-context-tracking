@@ -17,6 +17,8 @@ pub struct DayBudget {
     pub notified: bool,
     #[serde(default)]
     pub personal_notified: bool,
+    #[serde(default)]
+    pub counts_from: u64,
 }
 
 pub struct OverBudget {
@@ -24,7 +26,7 @@ pub struct OverBudget {
     pub budget: f64,
 }
 
-fn start(day: u64, window: Window, now: u64) -> DayBudget {
+fn start(day: u64, window: Window, now: u64, counts_from: u64) -> DayBudget {
     let days_left = window.resets_at.saturating_sub(now) as f64 / DAY_SECONDS;
     DayBudget {
         day,
@@ -33,19 +35,23 @@ fn start(day: u64, window: Window, now: u64) -> DayBudget {
         budget: (FULL_PERCENT - window.used_percentage).max(0.0) / days_left.max(1.0),
         notified: false,
         personal_notified: false,
+        counts_from,
     }
 }
 
 pub fn step(
     saved: Option<DayBudget>,
     day: u64,
+    day_started: u64,
     window: Window,
     now: u64,
 ) -> (DayBudget, Option<OverBudget>) {
-    let same = saved.filter(|state| {
-        state.day == day && state.resets_at.abs_diff(window.resets_at) < SAME_WINDOW_SECONDS
-    });
-    let mut state = same.unwrap_or_else(|| start(day, window, now));
+    let same_day = saved.filter(|state| state.day == day);
+    let reset_today = same_day.is_some();
+    let same =
+        same_day.filter(|state| state.resets_at.abs_diff(window.resets_at) < SAME_WINDOW_SECONDS);
+    let counts_from = if reset_today { now } else { day_started };
+    let mut state = same.unwrap_or_else(|| start(day, window, now, counts_from));
     let used_today = window.used_percentage - state.start_used;
     if state.notified || used_today <= state.budget {
         return (state, None);
@@ -100,23 +106,23 @@ mod tests {
     #[test]
     fn warns_once_when_today_goes_over_the_budget_set_at_the_start_of_the_day() {
         let now = 5 * DAY;
-        let (state, over) = step(None, 5, window(20.0), now);
+        let (state, over) = step(None, 5, 5 * DAY, window(20.0), now);
         assert!(over.is_none());
         assert_eq!(state.budget, 16.0);
-        let (state, over) = step(Some(state), 5, window(30.0), now + 3_600);
+        let (state, over) = step(Some(state), 5, 5 * DAY, window(30.0), now + 3_600);
         assert!(over.is_none());
-        let (state, over) = step(Some(state), 5, window(37.0), now + 7_200);
+        let (state, over) = step(Some(state), 5, 5 * DAY, window(37.0), now + 7_200);
         let over = over.expect("over budget");
         assert_eq!((over.used_today, over.budget), (17.0, 16.0));
-        let (state, over) = step(Some(state), 5, window(40.0), now + 9_000);
+        let (state, over) = step(Some(state), 5, 5 * DAY, window(40.0), now + 9_000);
         assert!(over.is_none() && state.notified);
-        let (next_day, over) = step(Some(state), 6, window(40.0), now + DAY);
+        let (next_day, over) = step(Some(state), 6, 6 * DAY, window(40.0), now + DAY);
         assert!(over.is_none() && !next_day.notified && next_day.start_used == 40.0);
     }
 
     #[test]
     fn a_shared_account_splits_the_budget_and_warns_the_member_once() {
-        let (mut state, _) = step(None, 5, window(20.0), 5 * DAY);
+        let (mut state, _) = step(None, 5, 5 * DAY, window(20.0), 5 * DAY);
         assert_eq!(personal(&mut state, 3.0, 1), None);
         let (mine, over) = personal(&mut state, 3.0, 4).expect("shared");
         assert_eq!((mine.share, over), (4.0, false));
@@ -128,13 +134,16 @@ mod tests {
 
     #[test]
     fn a_new_window_starts_a_new_budget_the_same_day() {
-        let (state, _) = step(None, 5, window(90.0), 5 * DAY);
+        let (state, _) = step(None, 5, 5 * DAY, window(90.0), 5 * DAY);
         let fresh = Window {
             used_percentage: 2.0,
             resets_at: 17 * DAY,
         };
-        let (state, over) = step(Some(state), 5, fresh, 5 * DAY + 60);
+        let (state, over) = step(Some(state), 5, 5 * DAY, fresh, 5 * DAY + 60);
         assert!(over.is_none());
         assert_eq!(state.start_used, 2.0);
+        assert_eq!(state.counts_from, 5 * DAY + 60);
+        let (next_day, _) = step(Some(state), 6, 6 * DAY, fresh, 6 * DAY + 600);
+        assert_eq!(next_day.counts_from, 6 * DAY);
     }
 }

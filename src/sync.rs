@@ -183,10 +183,13 @@ struct IngestResult {
     account_members: Option<u32>,
 }
 
-type PlanReading = Option<u64>;
+type PlanReading = Option<PlanLimits>;
 
 fn plan_reading() -> PlanReading {
-    plan_limits::load().map(|limits| limits.captured_at)
+    plan_limits::load().map(|limits| PlanLimits {
+        captured_at: 0,
+        ..limits
+    })
 }
 
 fn version_parts(version: &str) -> Vec<u64> {

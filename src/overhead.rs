@@ -52,41 +52,74 @@ struct Source {
 }
 
 pub fn estimate(claude_dir: &Path, project: &str) -> Overhead {
-    let project_dir = (!project.is_empty()).then(|| Path::new(project));
-    let sources = sources(claude_dir, project_dir);
-    Overhead {
-        memory_files: memory_files(claude_dir, project, project_dir),
-        agents: sources
-            .iter()
-            .flat_map(|source| listing(source, &md_files(&source.root.join("agents"))))
-            .collect(),
-        skills: sources
-            .iter()
-            .flat_map(|source| {
-                let mut files = platform::find_files(&source.root.join("skills"), |path| {
-                    path.file_name().is_some_and(|name| name == "SKILL.md")
-                });
-                files.extend(md_files(&source.root.join("commands")));
-                listing(source, &files)
-            })
-            .map(|item| item.tokens)
-            .sum(),
+    Estimator::new(claude_dir).estimate(project)
+}
+
+#[derive(Default)]
+struct Listed {
+    agents: Vec<Item>,
+    skills: u64,
+}
+
+impl Listed {
+    fn of(sources: &[Source]) -> Self {
+        Self {
+            agents: sources
+                .iter()
+                .flat_map(|source| listing(source, &md_files(&source.root.join("agents"))))
+                .collect(),
+            skills: sources
+                .iter()
+                .flat_map(|source| {
+                    let mut files = platform::find_files(&source.root.join("skills"), |path| {
+                        path.file_name().is_some_and(|name| name == "SKILL.md")
+                    });
+                    files.extend(md_files(&source.root.join("commands")));
+                    listing(source, &files)
+                })
+                .map(|item| item.tokens)
+                .sum(),
+        }
     }
 }
 
-fn sources(claude_dir: &Path, project_dir: Option<&Path>) -> Vec<Source> {
-    let mut sources = vec![Source {
-        prefix: None,
-        root: claude_dir.to_path_buf(),
-    }];
-    if let Some(dir) = project_dir {
-        sources.push(Source {
+pub struct Estimator {
+    claude_dir: PathBuf,
+    global: Listed,
+    plugins: Listed,
+}
+
+impl Estimator {
+    pub fn new(claude_dir: &Path) -> Self {
+        let global = Source {
             prefix: None,
-            root: dir.join(".claude"),
-        });
+            root: claude_dir.to_path_buf(),
+        };
+        Self {
+            claude_dir: claude_dir.to_path_buf(),
+            global: Listed::of(&[global]),
+            plugins: Listed::of(&enabled_plugins(claude_dir)),
+        }
     }
-    sources.extend(enabled_plugins(claude_dir));
-    sources
+
+    pub fn estimate(&self, project: &str) -> Overhead {
+        let project_dir = (!project.is_empty()).then(|| Path::new(project));
+        let local = project_dir.map_or_else(Listed::default, |dir| {
+            Listed::of(&[Source {
+                prefix: None,
+                root: dir.join(".claude"),
+            }])
+        });
+        Overhead {
+            memory_files: memory_files(&self.claude_dir, project, project_dir),
+            agents: [&self.global.agents, &local.agents, &self.plugins.agents]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            skills: self.global.skills + local.skills + self.plugins.skills,
+        }
+    }
 }
 
 fn enabled_plugins(claude_dir: &Path) -> Vec<Source> {

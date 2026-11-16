@@ -28,6 +28,11 @@ const DAY_SECONDS: i64 = 86_400;
 const LIMIT_STEPS: [f64; 2] = [80.0, 90.0];
 const HOUR_SECONDS: u64 = 3_600;
 
+pub fn local_day(now: u64, utc_offset: i64) -> u64 {
+    u64::try_from((i64::try_from(now).unwrap_or_default() + utc_offset).div_euclid(DAY_SECONDS))
+        .unwrap_or_default()
+}
+
 pub fn day_start(now: u64, utc_offset: i64) -> u64 {
     let local = i64::try_from(now).unwrap_or_default() + utc_offset;
     u64::try_from(local - local.rem_euclid(DAY_SECONDS) - utc_offset).unwrap_or_default()
@@ -61,6 +66,7 @@ pub fn tray_text(today: u64, active: usize, sync: &str) -> String {
 #[derive(Default)]
 pub struct FullWarnings {
     warned: HashSet<String>,
+    primed: bool,
 }
 
 impl FullWarnings {
@@ -73,10 +79,11 @@ impl FullWarnings {
             let fraction = session.usage_fraction();
             if fraction < WARN_AT {
                 self.warned.remove(&session.id);
-            } else if fraction >= FULL_AT && self.warned.insert(session.id.clone()) {
+            } else if fraction >= FULL_AT && self.warned.insert(session.id.clone()) && self.primed {
                 fresh.push(session);
             }
         }
+        self.primed = true;
         fresh
     }
 }
@@ -105,7 +112,11 @@ impl LimitWarnings {
                 .iter()
                 .filter(|step| window.used_percentage >= **step)
             {
-                let key = (label.clone(), window.resets_at / HOUR_SECONDS, *step as u8);
+                let key = (
+                    label.clone(),
+                    (window.resets_at + HOUR_SECONDS / 2) / HOUR_SECONDS,
+                    *step as u8,
+                );
                 crossed |= self.seen.insert(key);
             }
             if crossed && self.primed {
@@ -320,6 +331,13 @@ mod tests {
     }
 
     #[test]
+    fn local_day_keeps_its_date_when_the_offset_changes_for_daylight_saving() {
+        let noon_utc = 1_793_620_800;
+        assert_eq!(local_day(noon_utc, 3_600), local_day(noon_utc, 7_200));
+        assert_eq!(local_day(noon_utc, 13 * 3_600), local_day(noon_utc, 0) + 1);
+    }
+
+    #[test]
     fn day_start_uses_local_midnight() {
         let noon_utc = 1_793_620_800;
         assert_eq!(day_start(noon_utc, 0), 1_793_577_600);
@@ -350,6 +368,7 @@ mod tests {
     #[test]
     fn full_warning_fires_once_until_context_drops() {
         let mut warnings = FullWarnings::default();
+        assert!(warnings.newly_full([]).is_empty());
         let full = session("a", 950);
         assert_eq!(warnings.newly_full([&full]).len(), 1);
         assert!(warnings.newly_full([&full]).is_empty());
@@ -360,8 +379,18 @@ mod tests {
     }
 
     #[test]
+    fn sessions_already_full_at_startup_stay_quiet() {
+        let mut warnings = FullWarnings::default();
+        let full = session("a", 950);
+        assert!(warnings.newly_full([&full]).is_empty());
+        assert!(warnings.newly_full([&full]).is_empty());
+        assert_eq!(warnings.newly_full([&session("b", 960)]).len(), 1);
+    }
+
+    #[test]
     fn full_warning_survives_idle_pauses() {
         let mut warnings = FullWarnings::default();
+        assert!(warnings.newly_full([]).is_empty());
         let full = session("a", 950);
         assert_eq!(warnings.newly_full([&full]).len(), 1);
         assert!(warnings.newly_full([]).is_empty());

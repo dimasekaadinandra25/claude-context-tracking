@@ -60,6 +60,7 @@ const SEARCH_ID: &str = "search";
 const OLDER_THAN: Duration = Duration::from_secs(7 * 86_400);
 const SYNC_REASON_CHARS: usize = 60;
 const EMPTY_STATE_SPACE: f32 = 48.0;
+const ALERTS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const PLAN_LIMITS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const PLAN_LIMIT_BAR_HEIGHT: f32 = 6.0;
@@ -92,6 +93,8 @@ pub struct App {
     runaway: RunawayWarnings,
     today_budget: Option<Today>,
     tray_weekly: Option<u8>,
+    alerts_refreshed: Option<Instant>,
+    today_context: u64,
     tray: Option<Tray>,
     sync: SyncStatus,
     settings: Option<Settings>,
@@ -155,6 +158,8 @@ impl App {
             runaway: RunawayWarnings::load(),
             today_budget: None,
             tray_weekly: None,
+            alerts_refreshed: None,
+            today_context: 0,
             tray,
             sync: if config.is_enabled() {
                 SyncStatus::Waiting
@@ -207,6 +212,7 @@ impl App {
             sessions.sort_by(|a, b| b.last_activity().cmp(a.last_activity()));
             self.sessions = sessions;
             self.indexing = None;
+            self.alerts_refreshed = None;
         }
     }
 
@@ -229,6 +235,17 @@ impl App {
     }
 
     fn refresh_alerts(&mut self) {
+        if self
+            .alerts_refreshed
+            .is_some_and(|at| at.elapsed() < ALERTS_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        if self.indexing.is_some() {
+            return;
+        }
+        self.alerts_refreshed = Some(Instant::now());
+        self.today_context = self.new_context_today();
         let now = SystemTime::now();
         let active: Vec<&Session> = self.sessions.iter().filter(|s| s.is_active(now)).collect();
         for session in self.warnings.newly_full(active.iter().copied()) {
@@ -249,7 +266,7 @@ impl App {
             return;
         };
         let sync = sync_text(&self.sync, local_offset()).0;
-        let text = alerts::tray_text(self.new_context_today(), active.len(), &sync);
+        let text = alerts::tray_text(self.today_context, active.len(), &sync);
         if text != self.tray_tooltip {
             tray::set_tooltip(tray, &text);
             self.tray_tooltip = text;
@@ -343,13 +360,20 @@ impl App {
                 let now = plan_limits::unix_now();
                 if let Some(window) = limits.seven_day.filter(|w| w.resets_at > now) {
                     let saved = crate::budget::load();
-                    let day = alerts::day_start(now, local_offset());
-                    let (mut state, over) = crate::budget::step(saved.clone(), day, window, now);
+                    let offset = local_offset();
+                    let day = alerts::local_day(now, offset);
+                    let day_started = alerts::day_start(now, offset);
+                    let (mut state, over) =
+                        crate::budget::step(saved.clone(), day, day_started, window, now);
                     let mine =
                         self.percent_rate
                             .zip(self.account_members)
                             .and_then(|(rate, members)| {
-                                let used = alerts::weight_since(&self.sessions, day) as f64 * rate
+                                let used = alerts::weight_since(
+                                    &self.sessions,
+                                    state.counts_from.max(day_started),
+                                ) as f64
+                                    * rate
                                     / MILLION;
                                 crate::budget::personal(&mut state, used, members)
                             });
@@ -389,7 +413,7 @@ impl App {
         if !missing && !stale {
             return;
         }
-        let claude_dir = platform::claude_dir();
+        let estimator = overhead::Estimator::new(&platform::claude_dir());
         self.overheads = self
             .sessions
             .iter()
@@ -397,7 +421,7 @@ impl App {
             .collect::<HashSet<_>>()
             .into_iter()
             .map(|project| {
-                let estimate = overhead::estimate(&claude_dir, &project);
+                let estimate = estimator.estimate(&project);
                 (project, estimate)
             })
             .collect();
@@ -526,7 +550,7 @@ impl App {
         }
         match sort {
             IdleSort::Largest => idle.sort_by_key(|s| std::cmp::Reverse(s.latest_context)),
-            IdleSort::Cost => idle.sort_by_key(|s| std::cmp::Reverse(s.weight())),
+            IdleSort::Cost => idle.sort_by_cached_key(|s| std::cmp::Reverse(s.weight())),
             IdleSort::Recent => {}
         }
         let (recent, older): (Vec<_>, Vec<_>) = idle
@@ -784,7 +808,7 @@ impl eframe::App for App {
         theme::paint_backdrop(ui);
         self.refresh_overheads();
         if self.mini.is_some() {
-            let today = self.new_context_today();
+            let today = self.today_context;
             let back = egui::CentralPanel::default()
                 .show(ui, |ui| mini::show(ui, &self.sessions, today))
                 .inner;

@@ -29,7 +29,9 @@ pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{unique}.tmp", std::process::id()));
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)
 }
